@@ -10,7 +10,7 @@ import json
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from config import TELEGRAM_TOKEN, ALLOWED_USER_ID, EMAIL_USER, EMAIL_PASSWORD, IMAP_SERVER
+from config import TELEGRAM_TOKEN, ADMIN_USER_ID, EMAIL_USER, EMAIL_PASSWORD, IMAP_SERVER
 from email_parser import EmailParser
 from schedule_manager import ScheduleManager
 from image_generator import ScheduleImageGenerator
@@ -133,7 +133,7 @@ def secure_command(func):
             return
 
         # Проверка доступа (если задан ALLOWED_USER_ID)
-        if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
+        if ADMIN_USER_ID != 0 and user_id != ADMIN_USER_ID:
             request_logger.log_request(user_id, username, func.__name__, success=False)
             await update.effective_message.reply_text("⛔ У вас нет доступа к этому боту.")
             return
@@ -165,7 +165,7 @@ def secure_callback(func):
             return
 
         # Проверка доступа
-        if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
+        if ADMIN_USER_ID != 0 and user_id != ADMIN_USER_ID:
             await query.answer("⛔ Нет доступа", show_alert=True)
             return
 
@@ -259,7 +259,7 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
     user_id = update.effective_user.id
 
     # Только для админа
-    if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
+    if ADMIN_USER_ID != 0 and user_id != ADMIN_USER_ID:
         await query.edit_message_text("⛔ Только для администратора.")
         return
 
@@ -471,7 +471,7 @@ async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Блокировка пользователя (только для админа)"""
     user_id = update.effective_user.id
 
-    if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
+    if ADMIN_USER_ID != 0 and user_id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Только для администратора.")
         return
 
@@ -492,7 +492,7 @@ async def unblock_user_command(update: Update, context: ContextTypes.DEFAULT_TYP
     """Разблокировка пользователя (только для админа)"""
     user_id = update.effective_user.id
 
-    if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
+    if ADMIN_USER_ID != 0 and user_id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Только для администратора.")
         return
 
