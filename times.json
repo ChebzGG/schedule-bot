@@ -1,0 +1,75 @@
+{
+  "пн": {
+    "урок 1": {"timebegin": "08:00", "timeend": "08:45"},
+    "урок 2": {"timebegin": "08:55", "timeend": "09:40"},
+    "урок 3": {"timebegin": "09:50", "timeend": "10:35"},
+    "урок 4": {"timebegin": "10:55", "timeend": "11:40"},
+    "урок 5": {"timebegin": "12:00", "timeend": "12:45"},
+    "урок 6": {"timebegin": "12:55", "timeend": "13:40"},
+    "урок 7": {"timebegin": "13:50", "timeend": "14:35"},
+    "урок 8": {"timebegin": "14:45", "timeend": "15:30"},
+    "урок 9": {"timebegin": "15:50", "timeend": "16:35"},
+    "урок 10": {"timebegin": "16:45", "timeend": "17:30"},
+    "урок 11": {"timebegin": "17:40", "timeend": "18:25"}
+  },
+  "вт": {
+    "урок 1": {"timebegin": "08:00", "timeend": "08:45"},
+    "урок 2": {"timebegin": "08:55", "timeend": "09:40"},
+    "урок 3": {"timebegin": "09:50", "timeend": "10:35"},
+    "урок 4": {"timebegin": "10:55", "timeend": "11:40"},
+    "урок 5": {"timebegin": "12:00", "timeend": "12:45"},
+    "урок 6": {"timebegin": "12:55", "timeend": "13:40"},
+    "урок 7": {"timebegin": "13:50", "timeend": "14:35"},
+    "урок 8": {"timebegin": "14:45", "timeend": "15:30"},
+    "урок 9": {"timebegin": "15:50", "timeend": "16:35"},
+    "урок 10": {"timebegin": "16:45", "timeend": "17:30"},
+    "урок 11": {"timebegin": "17:40", "timeend": "18:25"}
+  },
+  "ср": {
+    "урок 1": {"timebegin": "08:00", "timeend": "08:45"},
+    "урок 2": {"timebegin": "08:55", "timeend": "09:40"},
+    "урок 3": {"timebegin": "09:50", "timeend": "10:35"},
+    "урок 4": {"timebegin": "10:55", "timeend": "11:40"},
+    "урок 5": {"timebegin": "12:00", "timeend": "12:45"},
+    "урок 6": {"timebegin": "12:55", "timeend": "13:40"},
+    "урок 7": {"timebegin": "13:50", "timeend": "14:35"},
+    "урок 8": {"timebegin": "14:45", "timeend": "15:30"},
+    "урок 9": {"timebegin": "15:50", "timeend": "16:35"},
+    "урок 10": {"timebegin": "16:45", "timeend": "17:30"},
+    "урок 11": {"timebegin": "17:40", "timeend": "18:25"}
+  },
+  "чт": {
+    "урок 1": {"timebegin": "08:00", "timeend": "08:45"},
+    "урок 2": {"timebegin": "08:55", "timeend": "09:40"},
+    "урок 3": {"timebegin": "09:50", "timeend": "10:35"},
+    "урок 4": {"timebegin": "10:55", "timeend": "11:40"},
+    "урок 5": {"timebegin": "12:00", "timeend": "12:45"},
+    "урок 6": {"timebegin": "12:55", "timeend": "13:40"},
+    "урок 7": {"timebegin": "13:50", "timeend": "15:10"}
+  },
+  "пт": {
+    "урок 1": {"timebegin": "08:00", "timeend": "08:45"},
+    "урок 2": {"timebegin": "08:55", "timeend": "09:40"},
+    "урок 3": {"timebegin": "09:50", "timeend": "10:35"},
+    "урок 4": {"timebegin": "10:55", "timeend": "11:40"},
+    "урок 5": {"timebegin": "12:00", "timeend": "12:45"},
+    "урок 6": {"timebegin": "12:55", "timeend": "13:40"},
+    "урок 7": {"timebegin": "13:50", "timeend": "14:35"},
+    "урок 8": {"timebegin": "14:45", "timeend": "15:30"},
+    "урок 9": {"timebegin": "15:50", "timeend": "16:35"},
+    "урок 10": {"timebegin": "16:45", "timeend": "17:30"},
+    "урок 11": {"timebegin": "17:40", "timeend": "18:25"}
+  },
+  "сб": {
+    "урок 1": {"timebegin": "08:00", "timeend": "08:45"},
+    "урок 2": {"timebegin": "08:55", "timeend": "09:40"},
+    "урок 3": {"timebegin": "09:50", "timeend": "10:35"},
+    "урок 4": {"timebegin": "10:55", "timeend": "11:40"},
+    "урок 5": {"timebegin": "11:50", "timeend": "12:35"},
+    "урок 6": {"timebegin": "12:45", "timeend": "13:30"},
+    "урок 7": {"timebegin": "13:40", "timeend": "14:25"},
+    "урок 8": {"timebegin": "14:35", "timeend": "15:20"},
+    "урок 9": {"timebegin": "15:40", "timeend": "16:25"},
+    "урок 10": {"timebegin": "16:35", "timeend": "17:20"}
+  }
+}
