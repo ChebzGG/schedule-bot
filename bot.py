@@ -526,7 +526,6 @@ def main():
         logger.error("TELEGRAM_TOKEN не задан!")
         return
 
-    # Создаем необходимые директории
     os.makedirs('cache', exist_ok=True)
     os.makedirs('Fonts', exist_ok=True)
 
@@ -549,7 +548,18 @@ def main():
     logger.info("Бот запущен с защитой от DDoS!")
     logger.info(f"Rate limit: 15 запросов в минуту на пользователя")
 
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    if os.getenv('RENDER'):
+        PORT = int(os.getenv('PORT', 8080))
+        WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook"
+
+        application.run_webhook(
+            listen='0.0.0.0',
+            port=PORT,
+            webhook_url=WEBHOOK_URL,
+            secret_token='your-secret-token-123'
+        )
+    else:
+        application.run_polling()
 
 
 if __name__ == '__main__':
