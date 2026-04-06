@@ -222,7 +222,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
     has_cache = cache_info['total_lessons'] > 0
 
     # Проверка на админа
-    is_admin = update.effective_user.id == ALLOWED_USER_ID if ALLOWED_USER_ID != 0 else False
+    is_admin = update.effective_user.id == ADMIN_USER_ID if ADMIN_USER_ID != 0 else False
 
     keyboard = [
         [InlineKeyboardButton("📅 Сегодня", callback_data='today')],
