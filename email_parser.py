@@ -29,7 +29,7 @@ class EmailParser:
 
         # Паттерн для урока: устойчив к лишним пробелам и формату "пдгр.1"
         self.lesson_pattern = re.compile(
-            r'^[\s\xa0]*(\d+)[\s\xa0]+пара[\s\xa0]+(\d+)[\s\xa0]+час[\s\xa0]*(?:пдгр\.\d+[\s\xa0]+)?(.+?)(?:[\s\xa0]*[-–][\s\xa0]*(\d+))?[\s\xa0]*$',
+            r'^[\s\xa0]*(\d+)[\s\xa0]+пара[\s\xa0]+(\d+)[\s\xa0]+час[\s\xa0]*(пдгр\.\d+[\s\xa0]+)?(.+?)(?:[\s\xa0]*[-–][\s\xa0]*(\d+))?[\s\xa0]*$',
             re.IGNORECASE
         )
 
@@ -232,15 +232,42 @@ class EmailParser:
                     try:
                         para_num = int(lesson_match.group(1))
                         hour_num = int(lesson_match.group(2))
-                        lesson_name = lesson_match.group(3).strip()
-
-                        classroom_match = re.search(r'[-–](\d+)$', lesson_name)
-                        if classroom_match:
-                            classroom = classroom_match.group(1)
-                            lesson_name = lesson_name[:classroom_match.start()].strip()
-                            full_name = f"{lesson_name} (к.{classroom})"
+                        
+                        groups = lesson_match.groups()
+                        
+                        # Определяем, какой паттерн сработал (lesson_pattern имеет 5 групп, lesson_pattern2 - 3)
+                        if len(groups) >= 5 and groups[2] is not None:
+                            # Сработал lesson_pattern с префиксом "пдгр."
+                            subgroup_prefix = groups[2]
+                            is_lab = 'пдгр' in subgroup_prefix.lower()
+                            lesson_name = groups[3].strip() if groups[3] else ''
+                            classroom = groups[4] if len(groups) > 4 and groups[4] else None
+                        elif len(groups) >= 5 and groups[2] is None:
+                            # Сработал lesson_pattern без префикса "пдгр."
+                            is_lab = False
+                            lesson_name = groups[3].strip() if groups[3] else ''
+                            classroom = groups[4] if len(groups) > 4 and groups[4] else None
                         else:
-                            full_name = lesson_name
+                            # Сработал lesson_pattern2 (только 3 группы)
+                            is_lab = False
+                            lesson_name = groups[2].strip() if len(groups) > 2 and groups[2] else ''
+                            classroom = None
+                        
+                        # Если кабинет не найден в конце строки, пробуем найти его в названии
+                        if not classroom:
+                            classroom_match = re.search(r'[-–](\d+)$', lesson_name)
+                            if classroom_match:
+                                classroom = classroom_match.group(1)
+                                lesson_name = lesson_name[:classroom_match.start()].strip()
+                        
+                        # Определяем тип занятия
+                        lesson_type = "лаба" if is_lab else "лекция"
+                        
+                        # Формируем полное название с типом занятия и кабинетом
+                        if classroom:
+                            full_name = f"{lesson_name} ({lesson_type}, к.{classroom})"
+                        else:
+                            full_name = f"{lesson_name} ({lesson_type})"
 
                         lesson_number = (para_num - 1) * 2 + hour_num
                         lessons.append({'number': lesson_number, 'name': full_name})
