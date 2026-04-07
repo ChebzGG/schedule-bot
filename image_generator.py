@@ -1,6 +1,7 @@
 from PIL import Image, ImageDraw, ImageFont
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,8 @@ class ScheduleImageGenerator:
             'border': '#E1BEE7',
             'shadow_rgb': (40, 10, 60),
             'break_bg': '#FFD700',
-            'break_bg_start': '#FFD54F',   # светлый край градиента
-            'break_bg_end': '#FF8F00',     # тёмный край градиента
+            'break_bg_start': '#FFD54F',  # светлый край градиента
+            'break_bg_end': '#FF8F00',  # тёмный край градиента
             'break_text': '#4E342E',
             'small_break': '#F5F5F5'
         }
@@ -37,7 +38,7 @@ class ScheduleImageGenerator:
     def _hex_to_rgb(self, hex_color):
         """Преобразует HEX строку (#RRGGBB) в кортеж (R, G, B)"""
         hex_color = hex_color.lstrip('#')
-        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
     def _get_font(self, size=18, weight='regular'):
         font_files = {
@@ -111,7 +112,8 @@ class ScheduleImageGenerator:
             if dur > 0:
                 breaks_count += 1
 
-        height = self.header_height + (lesson_count * self.row_height) + (breaks_count * self.break_height) + self.padding * 2 + 60
+        height = self.header_height + (lesson_count * self.row_height) + (
+                    breaks_count * self.break_height) + self.padding * 2 + 60
         img = Image.new('RGB', (self.width, height), self.colors['background'])
         draw = ImageDraw.Draw(img)
 
@@ -164,13 +166,43 @@ class ScheduleImageGenerator:
             nh = draw.textbbox((0, 0), lesson_num, font=num_font)[3]
             draw.text((cx - nw // 2 + 1, cy - nh // 2 - 1), lesson_num, fill='#FFFFFF', font=num_font)
 
-            # Название
-            name_font = self._get_font(34, 'bold')
-            name = lesson['name']
-            max_width = self.width - self.padding * 2 - 550
-            while draw.textbbox((0, 0), name, font=name_font)[2] > max_width and len(name) > 3:
-                name = name[:-4] + "..."
-            draw.text((self.padding + 460, y + 22 + 10), name, fill=self.colors['text'], font=name_font)
+            # Название (теперь включает тип занятия и кабинет в формате: "Название лаба/лекция -кабинет")
+            name_font = self._get_font(34, 'semibold')  # Уменьшенный шрифт
+            full_name = lesson['name']  # Уже содержит "Название лаба/лекция -кабинет"
+
+            # Разделяем название на основную часть и суффикс (лаба/лекция -кабинет)
+            # Формат: "Название предмета лаба -601" или "Название предмета лекция"
+            suffix_match = re.search(r'\s+(лаба|лекция)(?:\s+-([\d-]+))?$', full_name)
+            if suffix_match:
+                base_name = full_name[:suffix_match.start()].strip()
+                lesson_type = suffix_match.group(1)
+                classroom = suffix_match.group(2) if suffix_match.group(2) else None
+
+                # Рисуем основную часть названия
+                max_width = self.width - self.padding * 2 - 550
+                while draw.textbbox((0, 0), base_name, font=name_font)[2] > max_width and len(base_name) > 3:
+                    base_name = base_name[:-4] + "..."
+                draw.text((self.padding + 460, y + 22 + 10), base_name, fill=self.colors['text'], font=name_font)
+
+                # Рисуем тип занятия и кабинет справа с выравниванием
+                type_font = self._get_font(24, 'semibold')
+                if classroom:
+                    type_text = f"{lesson_type} -{classroom}"
+                else:
+                    type_text = lesson_type
+
+                # Вычисляем позицию для правого выравнивания
+                type_width = draw.textbbox((0, 0), type_text, font=type_font)[2]
+                type_x = self.width - self.padding - type_width - 20
+                type_y = y + 24 + 10
+                draw.text((type_x, type_y), type_text, fill=self.colors['time_text'], font=type_font)
+            else:
+                # Если формат не распознан, рисуем как есть
+                max_width = self.width - self.padding * 2 - 550
+                name = full_name
+                while draw.textbbox((0, 0), name, font=name_font)[2] > max_width and len(name) > 3:
+                    name = name[:-4] + "..."
+                draw.text((self.padding + 460, y + 22 + 10), name, fill=self.colors['text'], font=name_font)
 
             y += self.row_height
 
