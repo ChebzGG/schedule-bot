@@ -17,19 +17,14 @@ class EmailParser:
         self.email_password = email_password
         self.imap_server = imap_server
         self._init_patterns()
-        # Компилируем regex один раз для скорости
         self._compiled_patterns = {}
 
     def _init_patterns(self):
-        # ✅ Гибкий паттерн: допускает \xa0, отсутствие пробела после : и разные тире
-        # Двоеточие может быть после "завтра/сегодня" или в конце строки
         self.date_day_pattern = re.compile(
             r'на[\s\xa0]+(?:завтра|сегодня)[\s\xa0]*:?\s*(\d{1,2})[\s\xa0]+([а-я]+)[\s\xa0]+(\d{4})[\s\xa0]*г\.?[\s\xa0]*[-–]?[\s\xa0]*([А-Яа-я]+)[\s\xa0]*:',
             re.IGNORECASE
         )
 
-        # Паттерн для урока: устойчив к лишним пробелам и формату "пдгр.1"
-        # Группа 1: номер пары, Группа 2: номер часа, Группа 3: опционально пдгр.X, Группа 4: название предмета, Группа 5: кабинет
         self.lesson_pattern = re.compile(
             r'^[\s\xa0]*(\d+)[\s\xa0]+пара[\s\xa0]+(\d+)[\s\xa0]+час[\s\xa0]*(пдгр\.\d+)?[\s\xa0]*(.+?)(?:[\s\xa0]*[-–]\s*(\d+(?:-\d+)?))?\s*$',
             re.IGNORECASE
@@ -42,7 +37,6 @@ class EmailParser:
 
         self.skip_pattern = re.compile(r'уважаемая|уважаемый|автоматическая рассылка|-{10,}', re.IGNORECASE)
 
-        # ✅ ИСПРАВЛЕНО: октябрь = 10
         self.months = {
             'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4, 'мая': 5, 'июня': 6,
             'июля': 7, 'августа': 8, 'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12
@@ -54,7 +48,6 @@ class EmailParser:
         }
 
     def _get_cached_pattern(self, pattern_name, pattern_regex):
-        """Кэширует скомпилированные regex для ускорения"""
         if pattern_name not in self._compiled_patterns:
             self._compiled_patterns[pattern_name] = re.compile(pattern_regex, re.IGNORECASE)
         return self._compiled_patterns[pattern_name]
@@ -68,8 +61,20 @@ class EmailParser:
             logger.error(f"Ошибка подключения: {e}")
             return None
 
+    def get_email_hash(self, msg) -> str:
+        """Генерирует уникальный хеш письма для отслеживания дубликатов"""
+        try:
+            message_id = msg.get('Message-ID', '')
+            date = msg.get('Date', '')
+            subject = self._get_subject(msg)
+            hash_content = f"{message_id}|{date}|{subject}"
+            return hashlib.md5(hash_content.encode('utf-8')).hexdigest()[:16]
+        except Exception:
+            import random
+            return hashlib.md5(f"{datetime.now()}{random.random()}".encode()).hexdigest()[:16]
+
     def search_emails(self, days_back=3, max_emails=50):
-        """Поиск писем за указанное количество дней (по умолчанию 3 дня)"""
+        """Поиск писем за указанное количество дней"""
         mail = self.connect()
         if not mail:
             return []
@@ -77,13 +82,9 @@ class EmailParser:
         try:
             mail.select('inbox', readonly=True)
 
-            # ✅ Ищем письма за days_back дней (вчера, сегодня, завтра)
-            # Завтрашние письма могут быть уже отправлены, поэтому берем с запасом
             date_since = datetime.now() - timedelta(days=days_back)
             date_str = date_since.strftime('%d-%b-%Y')
-            search_criteria = f'SINCE "{date_str}"'
 
-            # Также ищем письма, которые могут прийти завтра (если они уже есть)
             date_until = datetime.now() + timedelta(days=1)
             date_until_str = date_until.strftime('%d-%b-%Y')
             search_criteria = f'(SINCE "{date_str}" BEFORE "{date_until_str}")'
@@ -94,14 +95,10 @@ class EmailParser:
 
             email_ids = message_numbers[0].split()
 
-            # ✅ Логируем количество найденных писем с указанием периода
             logger.info(
                 f"Найдено писем за {days_back} дней (с {date_since.strftime('%d.%m.%Y')} по {date_until.strftime('%d.%m.%Y')}): {len(email_ids)}")
 
-            # Берем только последние N писем для ускорения
             email_ids = email_ids[-max_emails:] if len(email_ids) > max_emails else email_ids
-
-            # Параллельная загрузка писем
             emails = self._fetch_emails_parallel(mail, email_ids)
 
             mail.close()
@@ -115,11 +112,22 @@ class EmailParser:
                 pass
             return []
 
-    def _fetch_emails_parallel(self, mail, email_ids, max_workers=5):
-        """Параллельная загрузка писем"""
-        emails = []
+    def search_emails_with_hash(self, days_back=3, max_emails=50):
+        """Поиск писем с их хешами"""
+        emails = self.search_emails(days_back, max_emails)
+        result = []
+        for msg in emails:
+            email_hash = self.get_email_hash(msg)
+            result.append({
+                'message': msg,
+                'hash': email_hash,
+                'subject': self._get_subject(msg),
+                'date': msg.get('Date', '')
+            })
+        return result
 
-        # Разбиваем на чанки для batch-загрузки
+    def _fetch_emails_parallel(self, mail, email_ids, max_workers=5):
+        emails = []
         chunk_size = 10
         for i in range(0, len(email_ids), chunk_size):
             chunk = email_ids[i:i + chunk_size]
@@ -132,7 +140,6 @@ class EmailParser:
                             emails.append(email.message_from_bytes(data[1]))
             except Exception as e:
                 logger.warning(f"Ошибка batch-загрузки: {e}")
-                # Fallback: загружаем по одному
                 for eid in chunk:
                     try:
                         typ, msg_data = mail.fetch(eid, '(RFC822)')
@@ -157,7 +164,6 @@ class EmailParser:
             return str(subject)
 
     def extract_body(self, msg):
-        """Быстрое извлечение тела письма"""
         try:
             if msg.is_multipart():
                 for part in msg.walk():
@@ -173,8 +179,6 @@ class EmailParser:
                         if payload:
                             charset = part.get_content_charset() or 'utf-8'
                             html = payload.decode(charset, errors='ignore')
-                            # Быстрый парсинг HTML без создания полного DOM-дерева
-                            # Удаляем теги простым regex для скорости
                             text = re.sub(r'<[^>]+>', ' ', html)
                             text = re.sub(r'\s+', ' ', text)
                             return re.sub(r'[\xa0\u2009\u202f]', ' ', text)
@@ -189,14 +193,12 @@ class EmailParser:
         return ""
 
     def parse_schedule_from_text(self, text):
-        """Оптимизированный парсинг текста"""
         result = {}
         lines = text.split('\n')
         current_date = None
         current_day_code = None
         lessons = []
 
-        # Предварительная фильтрация строк
         filtered_lines = []
         for line in lines:
             line = line.strip()
@@ -207,11 +209,9 @@ class EmailParser:
             filtered_lines.append(line)
 
         for line in filtered_lines:
-            # Быстрая проверка на дату
             if 'на ' in line.lower() and ('сегодня' in line.lower() or 'завтра' in line.lower()):
                 date_match = self.date_day_pattern.search(line)
                 if date_match:
-                    # Сохраняем предыдущий день
                     if current_date and lessons:
                         result.setdefault(current_date, {})
                         result[current_date].setdefault(current_day_code, []).extend(lessons)
@@ -227,7 +227,6 @@ class EmailParser:
                     lessons = []
                     continue
 
-            # Быстрая проверка на урок
             if 'пара' in line:
                 lesson_match = self.lesson_pattern.match(line) or self.lesson_pattern2.match(line)
                 if lesson_match and current_date and current_day_code:
@@ -235,25 +234,19 @@ class EmailParser:
                         para_num = int(lesson_match.group(1))
                         hour_num = int(lesson_match.group(2))
 
-                        # Определяем количество групп в матче, чтобы понять какой паттерн сработал
                         groups = lesson_match.groups()
 
                         if len(groups) >= 5:
-                            # Это lesson_pattern: (пара, час, пдгр.X, название, кабинет)
-                            pdgr_prefix = lesson_match.group(3)  # может быть None или "пдгр.1"
+                            pdgr_prefix = lesson_match.group(3)
                             lesson_name = lesson_match.group(4).strip() if lesson_match.group(4) else ""
-                            classroom = lesson_match.group(
-                                5)  # может быть None или номер кабинета (например, "601" или "600-01")
+                            classroom = lesson_match.group(5)
                         else:
-                            # Это lesson_pattern2: (пара, час, название) - без пдгр и кабинета
                             pdgr_prefix = None
                             lesson_name = lesson_match.group(3).strip() if lesson_match.group(3) else ""
                             classroom = None
 
-                        # Определяем тип занятия: если есть "пдгр.X" - это лаба, иначе лекция
                         lesson_type = "лаба" if pdgr_prefix else "лекция"
 
-                        # Формируем полное название с типом занятия и кабинетом
                         if classroom:
                             full_name = f"{lesson_name} {lesson_type} -{classroom}"
                         else:
@@ -264,12 +257,10 @@ class EmailParser:
                     except Exception as e:
                         logger.warning(f"Ошибка парсинга урока: {e}")
 
-        # Сохраняем последний день
         if current_date and lessons:
             result.setdefault(current_date, {})
             result[current_date].setdefault(current_day_code, []).extend(lessons)
 
-        # Быстрая сортировка
         for date_key in result:
             for day in result[date_key]:
                 result[date_key][day].sort(key=lambda x: x['number'])
@@ -279,13 +270,6 @@ class EmailParser:
         return result
 
     def get_all_schedules(self, days_back=3, max_emails=50):
-        """
-        Основной метод получения расписания с оптимизациями
-
-        Args:
-            days_back: количество дней для поиска (по умолчанию 3 - вчера, сегодня, завтра)
-            max_emails: максимальное количество писем для обработки
-        """
         emails = self.search_emails(days_back, max_emails)
         if not emails:
             logger.warning("Письма не найдены")
@@ -295,18 +279,14 @@ class EmailParser:
         processed_count = 0
         skipped_count = 0
 
-        # Ключевые слова для быстрого фильтра (в виде set для O(1) поиска)
         keywords = {'распис', 'пара', 'урок', 'аудитория', 'к.'}
 
         for idx, msg in enumerate(emails):
             try:
-                # Быстрая проверка темы
                 subject = self._get_subject(msg)
                 subject_lower = subject.lower()
 
-                # Пропускаем письма, которые точно не про расписание
                 if not any(kw in subject_lower for kw in keywords):
-                    # Проверяем только начало тела для экономии времени
                     body_preview = self.extract_body(msg)[:500].lower()
                     if not any(kw in body_preview for kw in keywords):
                         skipped_count += 1
@@ -326,7 +306,6 @@ class EmailParser:
                             if day not in all_schedules[date_obj]:
                                 all_schedules[date_obj][day] = []
 
-                            # Быстрое объединение с проверкой на дубликаты
                             existing_numbers = {l['number'] for l in all_schedules[date_obj][day]}
                             for lesson in lessons:
                                 if lesson['number'] not in existing_numbers:
