@@ -8,6 +8,8 @@ import hashlib
 import hmac
 import json
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from config import TELEGRAM_TOKEN, ADMIN_USER_ID, EMAIL_USER, EMAIL_PASSWORD, IMAP_SERVER
@@ -25,6 +27,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# === HTTP HEALTH CHECK SERVER ===
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot is running')
+
+    def log_message(self, format, *args):
+        pass  # Отключаем логи HTTP
+
+
+def run_health_server():
+    port = int(os.getenv('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    logger.info(f"Health server started on port {port}")
+    server.serve_forever()
+
+
 # === АНТИ-DDoS ЗАЩИТА ===
 class RateLimiter:
     """Ограничитель частоты запросов"""
@@ -36,7 +57,6 @@ class RateLimiter:
 
     def is_allowed(self, user_id: int) -> bool:
         now = datetime.now().timestamp()
-        # Очищаем старые запросы
         self.requests[user_id] = [
             req_time for req_time in self.requests[user_id]
             if now - req_time < self.time_window
@@ -103,7 +123,7 @@ class RequestLogger:
 
 
 # Глобальные экземпляры защиты
-rate_limiter = RateLimiter(max_requests=15, time_window=60)  # 15 запросов в минуту
+rate_limiter = RateLimiter(max_requests=15, time_window=60)
 user_blacklist = UserBlacklist()
 request_logger = RequestLogger()
 
@@ -117,13 +137,11 @@ def secure_command(func):
         user_id = update.effective_user.id
         username = update.effective_user.username or str(user_id)
 
-        # Проверка черного списка
         if user_blacklist.is_blocked(user_id):
             request_logger.log_request(user_id, username, func.__name__, success=False)
             await update.effective_message.reply_text("⛔ Доступ запрещен.")
             return
 
-        # Rate limiting
         if not rate_limiter.is_allowed(user_id):
             request_logger.log_request(user_id, username, func.__name__, success=False)
             logger.warning(f"Rate limit exceeded for user {user_id}")
@@ -132,7 +150,6 @@ def secure_command(func):
             )
             return
 
-        # Проверка доступа (если задан ALLOWED_USER_ID)
         if ADMIN_USER_ID != 0 and user_id != ADMIN_USER_ID:
             request_logger.log_request(user_id, username, func.__name__, success=False)
             await update.effective_message.reply_text("⛔ У вас нет доступа к этому боту.")
@@ -153,18 +170,15 @@ def secure_callback(func):
         user_id = query.from_user.id
         username = query.from_user.username or str(user_id)
 
-        # Проверка черного списка
         if user_blacklist.is_blocked(user_id):
             await query.answer("⛔ Доступ запрещен", show_alert=True)
             return
 
-        # Rate limiting
         if not rate_limiter.is_allowed(user_id):
             logger.warning(f"Rate limit exceeded for user {user_id} in callback")
             await query.answer("⚠️ Слишком много запросов. Подождите минуту.", show_alert=True)
             return
 
-        # Проверка доступа
         if ADMIN_USER_ID != 0 and user_id != ADMIN_USER_ID:
             await query.answer("⛔ Нет доступа", show_alert=True)
             return
@@ -180,9 +194,9 @@ email_parser = EmailParser(EMAIL_USER, EMAIL_PASSWORD, IMAP_SERVER)
 schedule_manager = ScheduleManager()
 image_generator = ScheduleImageGenerator()
 
-# Кэш для изображений (чтобы не генерировать повторно)
+# Кэш для изображений
 image_cache: Dict[str, tuple] = {}
-IMAGE_CACHE_TTL = 3600  # 1 час
+IMAGE_CACHE_TTL = 3600
 
 
 def get_day_name(day_code: str) -> str:
@@ -221,7 +235,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
     cache_info = schedule_manager.get_cache_info()
     has_cache = cache_info['total_lessons'] > 0
 
-    # Проверка на админа
     is_admin = update.effective_user.id == ADMIN_USER_ID if ADMIN_USER_ID != 0 else False
 
     keyboard = [
@@ -231,7 +244,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         [InlineKeyboardButton("🔄 Обновить расписание", callback_data='update')]
     ]
 
-    # Админские кнопки
     if is_admin:
         keyboard.append([InlineKeyboardButton("⚙️ Админ-панель", callback_data='admin_panel')])
 
@@ -258,7 +270,6 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
     query = update.callback_query
     user_id = update.effective_user.id
 
-    # Только для админа
     if ADMIN_USER_ID != 0 and user_id != ADMIN_USER_ID:
         await query.edit_message_text("⛔ Только для администратора.")
         return
@@ -347,11 +358,9 @@ async def send_day_schedule_fast(update: Update, context: ContextTypes.DEFAULT_T
     day_name = get_day_name(day_code)
     cache_key = f"{target_date.isoformat()}_{day_code}"
 
-    # Проверка кэша изображений
     if cache_key in image_cache:
         image_path, cache_time = image_cache[cache_key]
         if datetime.now().timestamp() - cache_time < IMAGE_CACHE_TTL:
-            # Используем кэшированное изображение
             with open(image_path, 'rb') as photo:
                 await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
@@ -382,7 +391,6 @@ async def send_day_schedule_fast(update: Update, context: ContextTypes.DEFAULT_T
                                    lambda: image_generator.generate_day_schedule_image(day_code, lessons, date_str,
                                                                                        image_path))
 
-        # Сохраняем в кэш изображений
         image_cache[cache_key] = (image_path, datetime.now().timestamp())
 
         caption = f"📅 {day_name} - {date_str}\n📚 {len(lessons)} уроков"
@@ -402,7 +410,6 @@ async def update_from_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if await _try_load_from_email(days_back=14):
             cache_info = schedule_manager.get_cache_info()
-            # Очищаем кэш изображений при обновлении
             image_cache.clear()
             await query.edit_message_text(
                 f"✅ Расписание обновлено!\n📅 Дат: {len(cache_info['dates'])}\n📚 Уроков: {cache_info['total_lessons']}"
@@ -526,8 +533,13 @@ def main():
         logger.error("TELEGRAM_TOKEN не задан!")
         return
 
+    # Создаём необходимые директории
     os.makedirs('cache', exist_ok=True)
     os.makedirs('Fonts', exist_ok=True)
+
+    # Запускаем health-check сервер в отдельном потоке
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -548,8 +560,9 @@ def main():
     logger.info("Бот запущен с защитой от DDoS!")
     logger.info(f"Rate limit: 15 запросов в минуту на пользователя")
 
-    # Используем polling (webhook требует дополнительной настройки)
+    # Используем polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == '__main__':
     main()
