@@ -1,6 +1,1 @@
-.env
-__pycache__/
-*.pyc
-.cache/
-cache/
-*.log
+Nothing needs to be added to the .gitignore file since only a Python source file (bot.py) was modified and no build artifacts, dependencies, or temporary files were detected in the changes.

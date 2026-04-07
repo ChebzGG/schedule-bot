@@ -19,6 +19,9 @@ from image_generator import ScheduleImageGenerator
 
 EMAIL_CHECK_TIMEOUT = 30
 
+# Файл для хранения подписчиков
+SUBSCRIBERS_FILE = 'cache/subscribers.json'
+
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -224,6 +227,46 @@ image_generator = ScheduleImageGenerator()
 image_cache: Dict[str, tuple] = {}
 IMAGE_CACHE_TTL = 3600
 
+# Менеджер подписчиков
+class SubscriberManager:
+    def __init__(self, subscribers_file: str = SUBSCRIBERS_FILE):
+        self.subscribers_file = subscribers_file
+        self.subscribers: Set[int] = set()
+        self._load_subscribers()
+    
+    def _load_subscribers(self):
+        try:
+            if os.path.exists(self.subscribers_file):
+                with open(self.subscribers_file, 'r') as f:
+                    data = json.load(f)
+                    self.subscribers = set(data.get('users', []))
+        except Exception as e:
+            logger.error(f"Ошибка загрузки подписчиков: {e}")
+    
+    def _save_subscribers(self):
+        try:
+            os.makedirs(os.path.dirname(self.subscribers_file), exist_ok=True)
+            with open(self.subscribers_file, 'w') as f:
+                json.dump({'users': list(self.subscribers)}, f)
+        except Exception as e:
+            logger.error(f"Ошибка сохранения подписчиков: {e}")
+    
+    def add_subscriber(self, user_id: int):
+        self.subscribers.add(user_id)
+        self._save_subscribers()
+    
+    def remove_subscriber(self, user_id: int):
+        self.subscribers.discard(user_id)
+        self._save_subscribers()
+    
+    def is_subscribed(self, user_id: int) -> bool:
+        return user_id in self.subscribers
+    
+    def get_all_subscribers(self) -> Set[int]:
+        return self.subscribers.copy()
+
+subscriber_manager = SubscriberManager()
+
 
 def get_day_name(day_code: str) -> str:
     return {'пн': 'Понедельник', 'вт': 'Вторник', 'ср': 'Среда', 'чт': 'Четверг',
@@ -234,6 +277,8 @@ def get_day_name(day_code: str) -> str:
 
 @public_command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    subscriber_manager.add_subscriber(user_id)
     await show_main_menu(update, context, edit=False)
 
 
@@ -253,6 +298,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_day_schedule_fast(update, context, -1)
     elif data == 'update':
         await update_from_email(update, context)
+    elif data == 'subscribe':
+        await toggle_subscription(update, context)
     elif data.startswith('admin_'):
         # Проверка админа внутри admin_commands
         await admin_commands(update, context, data)
@@ -266,12 +313,17 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
 
     # Проверка на админа
     is_admin = update.effective_user.id == ADMIN_USER_ID
+    
+    # Проверка подписки
+    user_id = update.effective_user.id
+    is_subscribed = subscriber_manager.is_subscribed(user_id)
 
     keyboard = [
         [InlineKeyboardButton("📅 Сегодня", callback_data='today')],
         [InlineKeyboardButton("📆 Завтра", callback_data='tomorrow')],
         [InlineKeyboardButton("📅 Вчера", callback_data='yesterday')],
-        [InlineKeyboardButton("🔄 Обновить расписание", callback_data='update')]
+        [InlineKeyboardButton("🔄 Обновить расписание", callback_data='update')],
+        [InlineKeyboardButton("🔔 Уведомления: ВКЛ" if is_subscribed else "🔕 Уведомления: ВЫКЛ", callback_data='subscribe')]
     ]
 
     # Админские кнопки только для админа
@@ -294,6 +346,20 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         await update.message.reply_text(message_text, reply_markup=reply_markup)
     else:
         await update.effective_chat.send_message(message_text, reply_markup=reply_markup)
+
+
+async def toggle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if subscriber_manager.is_subscribed(user_id):
+        subscriber_manager.remove_subscriber(user_id)
+        await query.answer("🔕 Вы отписались от уведомлений", show_alert=True)
+    else:
+        subscriber_manager.add_subscriber(user_id)
+        await query.answer("🔔 Вы подписались на уведомления", show_alert=True)
+    
+    await show_main_menu(update, context, edit=True)
 
 
 @public_callback
@@ -552,6 +618,39 @@ async def _try_load_from_email(days_back=3):
     return False
 
 
+async def notify_subscribers_about_new_schedule(application, date_obj, day_code, lessons_count):
+    """Отправка уведомления подписчикам о новом расписании"""
+    subscribers = subscriber_manager.get_all_subscribers()
+    if not subscribers:
+        return
+    
+    days_codes = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс']
+    
+    # Определяем день недели из даты
+    try:
+        if isinstance(date_obj, str):
+            date_parsed = datetime.fromisoformat(date_obj).date()
+        else:
+            date_parsed = date_obj
+        date_str = date_parsed.strftime('%d.%m.%y')
+        day_name = get_day_name(days_codes[date_parsed.weekday()])
+    except Exception:
+        date_str = date_obj.isoformat() if hasattr(date_obj, 'isoformat') else str(date_obj)
+        day_name = day_code.upper()
+    
+    message = f"📢 пришло новое расписание:\n📅 {day_name} - {date_str}\n📚 {lessons_count} уроков"
+    
+    success_count = 0
+    for user_id in subscribers:
+        try:
+            await application.bot.send_message(chat_id=user_id, text=message)
+            success_count += 1
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+    
+    logger.info(f"📬 Уведомления отправлены: {success_count}/{len(subscribers)} подписчиков")
+
+
 def main():
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN не задан!")
@@ -584,6 +683,39 @@ def main():
     logger.info("Бот запущен с защитой от DDoS!")
     logger.info(f"Rate limit: 15 запросов в минуту на пользователя")
     logger.info(f"Admin ID: {ADMIN_USER_ID}")
+
+    # Запускаем периодическую проверку почты и уведомления
+    async def check_email_periodically(context):
+        """Периодическая проверка почты и отправка уведомлений"""
+        try:
+            logger.info("🔄 Авто-проверка почты...")
+            all_schedules = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: email_parser.get_all_schedules(days_back=3)
+            )
+            if all_schedules:
+                # Получаем текущий кэш до обновления
+                old_cache = schedule_manager._load_cache()
+                
+                # Обновляем расписание
+                schedule_manager.update_schedule_from_email(all_schedules)
+                
+                # Находим новые даты и отправляем уведомления
+                for date_obj, day_schedules in all_schedules.items():
+                    for day_code, lessons in day_schedules.items():
+                        date_str = date_obj.isoformat() if hasattr(date_obj, 'isoformat') else str(date_obj)
+                        # Проверяем, было ли это расписание уже в кэше
+                        if date_str not in old_cache or len(old_cache.get(date_str, [])) != len(lessons):
+                            logger.info(f"📬 Новое расписание на {date_str}: {len(lessons)} уроков")
+                            await notify_subscribers_about_new_schedule(application, date_obj, day_code, len(lessons))
+                
+                image_cache.clear()
+                logger.info("✅ Авто-обновление завершено")
+        except Exception as e:
+            logger.error(f"Ошибка авто-проверки: {e}")
+
+    # Запускаем проверку каждые 5 минут
+    job_queue = application.job_queue
+    job_queue.run_repeating(check_email_periodically, interval=300, first=10)
 
     # Используем polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
