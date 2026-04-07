@@ -22,14 +22,16 @@ class EmailParser:
 
     def _init_patterns(self):
         # ✅ Гибкий паттерн: допускает \xa0, отсутствие пробела после : и разные тире
+        # Двоеточие может быть после "завтра/сегодня" или в конце строки
         self.date_day_pattern = re.compile(
-            r'на[\s\xa0]+(?:завтра|сегодня)[\s\xa0]*:[\s\xa0]*(\d{1,2})[\s\xa0]+([а-я]+)[\s\xa0]+(\d{4})[\s\xa0]*г\.?[\s\xa0]*[-–][\s\xa0]*([А-Яа-я]+)[\s\xa0]*:',
+            r'на[\s\xa0]+(?:завтра|сегодня)[\s\xa0]*:?\s*(\d{1,2})[\s\xa0]+([а-я]+)[\s\xa0]+(\d{4})[\s\xa0]*г\.?[\s\xa0]*[-–]?[\s\xa0]*([А-Яа-я]+)[\s\xa0]*:',
             re.IGNORECASE
         )
 
         # Паттерн для урока: устойчив к лишним пробелам и формату "пдгр.1"
+        # Группа 1: номер пары, Группа 2: номер часа, Группа 3: опционально пдгр.X, Группа 4: название предмета, Группа 5: кабинет
         self.lesson_pattern = re.compile(
-            r'^[\s\xa0]*(\d+)[\s\xa0]+пара[\s\xa0]+(\d+)[\s\xa0]+час[\s\xa0]*(?:пдгр\.\d+[\s\xa0]+)?(.+?)(?:[\s\xa0]*[-–][\s\xa0]*(\d+))?[\s\xa0]*$',
+            r'^[\s\xa0]*(\d+)[\s\xa0]+пара[\s\xa0]+(\d+)[\s\xa0]+час[\s\xa0]*(пдгр\.\d+)?[\s\xa0]*(.+?)(?:[\s\xa0]*[-–]\s*(\d+(?:-\d+)?))?\s*$',
             re.IGNORECASE
         )
 
@@ -232,16 +234,30 @@ class EmailParser:
                     try:
                         para_num = int(lesson_match.group(1))
                         hour_num = int(lesson_match.group(2))
-                        lesson_name = lesson_match.group(3).strip()
-
-                        classroom_match = re.search(r'[-–](\d+)$', lesson_name)
-                        if classroom_match:
-                            classroom = classroom_match.group(1)
-                            lesson_name = lesson_name[:classroom_match.start()].strip()
-                            full_name = f"{lesson_name} (к.{classroom})"
+                        
+                        # Определяем количество групп в матче, чтобы понять какой паттерн сработал
+                        groups = lesson_match.groups()
+                        
+                        if len(groups) >= 5:
+                            # Это lesson_pattern: (пара, час, пдгр.X, название, кабинет)
+                            pdgr_prefix = lesson_match.group(3)  # может быть None или "пдгр.1"
+                            lesson_name = lesson_match.group(4).strip() if lesson_match.group(4) else ""
+                            classroom = lesson_match.group(5)  # может быть None или номер кабинета (например, "601" или "600-01")
                         else:
-                            full_name = lesson_name
-
+                            # Это lesson_pattern2: (пара, час, название) - без пдгр и кабинета
+                            pdgr_prefix = None
+                            lesson_name = lesson_match.group(3).strip() if lesson_match.group(3) else ""
+                            classroom = None
+                        
+                        # Определяем тип занятия: если есть "пдгр.X" - это лаба, иначе лекция
+                        lesson_type = "лаба" if pdgr_prefix else "лекция"
+                        
+                        # Формируем полное название с типом занятия и кабинетом
+                        if classroom:
+                            full_name = f"{lesson_name} {lesson_type} -{classroom}"
+                        else:
+                            full_name = f"{lesson_name} {lesson_type}"
+                        
                         lesson_number = (para_num - 1) * 2 + hour_num
                         lessons.append({'number': lesson_number, 'name': full_name})
                     except Exception as e:
