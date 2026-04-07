@@ -261,13 +261,16 @@ class EmailParser:
                                 lesson_name = lesson_name[:classroom_match.start()].strip()
                         
                         # Определяем тип занятия
-                        lesson_type = "лаба" if is_lab else "лекция"
-                        
-                        # Формируем полное название с типом занятия и кабинетом
-                        if classroom:
-                            full_name = f"{lesson_name} ({lesson_type}, к.{classroom})"
+                        # Исключение: Физич. культ. и здор. не помечается как лаба/лекция
+                        if 'физич. культ. и здор.' in lesson_name.lower():
+                            full_name = f"{lesson_name} (к.{classroom})" if classroom else lesson_name
                         else:
-                            full_name = f"{lesson_name} ({lesson_type})"
+                            lesson_type = "лаба" if is_lab else "лекция"
+                            # Формируем полное название с типом занятия и кабинетом
+                            if classroom:
+                                full_name = f"{lesson_name} ({lesson_type}, к.{classroom})"
+                            else:
+                                full_name = f"{lesson_name} ({lesson_type})"
 
                         lesson_number = (para_num - 1) * 2 + hour_num
                         lessons.append({'number': lesson_number, 'name': full_name})
