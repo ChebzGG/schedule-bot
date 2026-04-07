@@ -27,6 +27,89 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# === УПРАВЛЕНИЕ ПОДПИСЧИКАМИ ===
+class SubscriberManager:
+    """Менеджер подписчиков на уведомления о расписании"""
+    
+    def __init__(self, subscribers_file: str = 'cache/subscribers.json'):
+        self.subscribers_file = subscribers_file
+        self.subscribers: Set[int] = set()
+        self._load_subscribers()
+    
+    def _load_subscribers(self):
+        try:
+            if os.path.exists(self.subscribers_file):
+                with open(self.subscribers_file, 'r') as f:
+                    data = json.load(f)
+                    self.subscribers = set(data.get('users', []))
+        except Exception as e:
+            logger.error(f"Ошибка загрузки списка подписчиков: {e}")
+    
+    def _save_subscribers(self):
+        try:
+            os.makedirs(os.path.dirname(self.subscribers_file), exist_ok=True)
+            with open(self.subscribers_file, 'w') as f:
+                json.dump({'users': list(self.subscribers)}, f)
+        except Exception as e:
+            logger.error(f"Ошибка сохранения списка подписчиков: {e}")
+    
+    def subscribe(self, user_id: int):
+        self.subscribers.add(user_id)
+        self._save_subscribers()
+    
+    def unsubscribe(self, user_id: int):
+        self.subscribers.discard(user_id)
+        self._save_subscribers()
+    
+    def is_subscribed(self, user_id: int) -> bool:
+        return user_id in self.subscribers
+    
+    def get_all_subscribers(self) -> Set[int]:
+        return self.subscribers.copy()
+
+
+# === ОТСЛЕЖИВАНИЕ ИЗМЕНЕНИЙ РАСПИСАНИЯ ===
+class ScheduleTracker:
+    """Отслеживает изменения в расписании для уведомлений"""
+    
+    def __init__(self, tracker_file: str = 'cache/schedule_tracker.json'):
+        self.tracker_file = tracker_file
+        self.last_schedule_hash: str = ""
+        self._load_tracker()
+    
+    def _load_tracker(self):
+        try:
+            if os.path.exists(self.tracker_file):
+                with open(self.tracker_file, 'r') as f:
+                    data = json.load(f)
+                    self.last_schedule_hash = data.get('last_hash', "")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки трекера: {e}")
+    
+    def _save_tracker(self):
+        try:
+            os.makedirs(os.path.dirname(self.tracker_file), exist_ok=True)
+            with open(self.tracker_file, 'w') as f:
+                json.dump({'last_hash': self.last_schedule_hash}, f)
+        except Exception as e:
+            logger.error(f"Ошибка сохранения трекера: {e}")
+    
+    def compute_schedule_hash(self, schedule_data: dict) -> str:
+        """Вычисляет хэш расписания для сравнения"""
+        # Сериализуем данные в строку
+        schedule_str = json.dumps(schedule_data, sort_keys=True, ensure_ascii=False)
+        return hashlib.md5(schedule_str.encode()).hexdigest()
+    
+    def has_changed(self, new_schedule_data: dict) -> bool:
+        """Проверяет, изменилось ли расписание"""
+        new_hash = self.compute_schedule_hash(new_schedule_data)
+        if new_hash != self.last_schedule_hash:
+            self.last_schedule_hash = new_hash
+            self._save_tracker()
+            return True
+        return False
+
+
 # === HTTP HEALTH CHECK SERVER ===
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -219,6 +302,8 @@ def public_callback(func):
 email_parser = EmailParser(EMAIL_USER, EMAIL_PASSWORD, IMAP_SERVER)
 schedule_manager = ScheduleManager()
 image_generator = ScheduleImageGenerator()
+subscriber_manager = SubscriberManager()
+schedule_tracker = ScheduleTracker()
 
 # Кэш для изображений
 image_cache: Dict[str, tuple] = {}
@@ -234,6 +319,13 @@ def get_day_name(day_code: str) -> str:
 
 @public_command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start с авто-подпиской пользователя"""
+    user_id = update.effective_user.id
+    # Автоматически подписываем пользователя при первом запуске
+    if not subscriber_manager.is_subscribed(user_id):
+        subscriber_manager.subscribe(user_id)
+        logger.info(f"Пользователь {user_id} автоматически подписан на уведомления")
+    
     await show_main_menu(update, context, edit=False)
 
 
@@ -357,7 +449,7 @@ async def update_from_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.edit_message_text("🔄 Загружаю расписание из email...")
     try:
-        if await _try_load_from_email(days_back=14):
+        if await _try_load_from_email(days_back=14, notify_users=True, context=context):
             cache_info = schedule_manager.get_cache_info()
             image_cache.clear()
             await query.edit_message_text(
@@ -426,13 +518,40 @@ async def clear_cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Публичная статистика"""
     cache_info = schedule_manager.get_cache_info()
+    subscribers_count = len(subscriber_manager.get_all_subscribers())
     await update.message.reply_text(
         f"📊 Статистика бота:\n\n"
         f"📅 Дат в расписании: {len(cache_info['dates'])}\n"
         f"📚 Всего уроков: {cache_info['total_lessons']}\n"
         f"🕐 Обновлено: {cache_info['age_text']}\n"
+        f"🔔 Подписчиков на уведомления: {subscribers_count}\n"
         f"👥 Бот доступен для всех"
     )
+
+
+@public_command
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подписка на уведомления о новом расписании"""
+    user_id = update.effective_user.id
+    if subscriber_manager.is_subscribed(user_id):
+        await update.message.reply_text("✅ Вы уже подписаны на уведомления о расписании.")
+    else:
+        subscriber_manager.subscribe(user_id)
+        await update.message.reply_text(
+            "✅ Вы успешно подписались на уведомления!\n\n"
+            "🔔 Теперь вы будете получать сообщения, когда придёт новое расписание."
+        )
+
+
+@public_command
+async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отписка от уведомлений о новом расписании"""
+    user_id = update.effective_user.id
+    if subscriber_manager.is_subscribed(user_id):
+        subscriber_manager.unsubscribe(user_id)
+        await update.message.reply_text("❌ Вы отписались от уведомлений о расписании.")
+    else:
+        await update.message.reply_text("ℹ️ Вы не были подписаны на уведомления.")
 
 
 # === АДМИНСКИЕ КОМАНДЫ (только для тебя) ===
@@ -484,7 +603,7 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
 
     elif data == 'admin_force_update':
         await query.edit_message_text("🔄 Принудительное обновление...")
-        if await _try_load_from_email(days_back=14):
+        if await _try_load_from_email(days_back=14, notify_users=True, context=context):
             cache_info = schedule_manager.get_cache_info()
             await query.edit_message_text(
                 f"✅ Расписание обновлено!\n📅 Дат: {len(cache_info['dates'])}\n📚 Уроков: {cache_info['total_lessons']}",
@@ -535,7 +654,15 @@ async def unblock_user_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ Неверный формат ID.")
 
 
-async def _try_load_from_email(days_back=3):
+async def _try_load_from_email(days_back=3, notify_users=False, context=None):
+    """
+    Загрузка расписания из email с опциональным уведомлением подписчиков
+    
+    Args:
+        days_back: количество дней для поиска
+        notify_users: если True, отправить уведомления подписчикам при изменении расписания
+        context: контекст бота для отправки сообщений
+    """
     try:
         loop = asyncio.get_running_loop()
         all_schedule = await asyncio.wait_for(
@@ -543,13 +670,69 @@ async def _try_load_from_email(days_back=3):
             timeout=EMAIL_CHECK_TIMEOUT
         )
         if all_schedule:
+            # Проверяем, изменилось ли расписание
+            schedule_changed = schedule_tracker.has_changed(all_schedule)
+            
             schedule_manager.update_schedule_from_email(all_schedule)
+            
+            # Уведомляем подписчиков если расписание изменилось
+            if notify_users and schedule_changed and context:
+                await _notify_subscribers_about_update(all_schedule, context)
+            
             return True
     except asyncio.TimeoutError:
         logger.error("Таймаут загрузки email")
     except Exception as e:
         logger.error(f"Ошибка авто-загрузки: {e}")
     return False
+
+
+async def _notify_subscribers_about_update(schedule_data, context):
+    """Отправляет уведомления всем подписчикам о новом расписании"""
+    subscribers = subscriber_manager.get_all_subscribers()
+    if not subscribers:
+        logger.info("Нет подписчиков для уведомления")
+        return
+    
+    # Формируем сводку по расписанию
+    dates_count = len(schedule_data)
+    total_lessons = sum(len(lessons) for day_schedules in schedule_data.values() for lessons in day_schedules.values())
+    
+    # Получаем ближайшие даты для отображения
+    sorted_dates = sorted(schedule_data.keys())
+    notification_text = "🔔 Пришло новое расписание:\n\n"
+    
+    for date_obj in sorted_dates[:3]:  # Показываем первые 3 даты
+        date_str = date_obj.strftime('%d.%m.%y')
+        day_code = ('пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс')[date_obj.weekday()]
+        day_name = get_day_name(day_code)
+        
+        # Считаем уроки в этот день
+        day_lessons_count = sum(len(lessons) for lessons in schedule_data[date_obj].values())
+        
+        notification_text += f"📅 {day_name} - {date_str}\n"
+        notification_text += f"📚 {day_lessons_count} уроков\n\n"
+    
+    if dates_count > 3:
+        notification_text += f"... и ещё {dates_count - 3} дат\n"
+    
+    # Отправляем каждому подписчику
+    success_count = 0
+    for user_id in subscribers:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=notification_text.strip()
+            )
+            success_count += 1
+            await asyncio.sleep(0.1)  # Небольшая задержка чтобы не спамить
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            # Если пользователь заблокировал бота, отписываем его
+            if "blocked" in str(e).lower() or "forbidden" in str(e).lower():
+                subscriber_manager.unsubscribe(user_id)
+    
+    logger.info(f"Уведомления отправлены: {success_count}/{len(subscribers)} подписчиков")
 
 
 def main():
@@ -573,6 +756,8 @@ def main():
     application.add_handler(CommandHandler("cache", cache_info_command))
     application.add_handler(CommandHandler("clearcache", clear_cache_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("subscribe", subscribe_command))
+    application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
 
     # Админские команды
     application.add_handler(CommandHandler("block", block_user_command))
@@ -584,6 +769,7 @@ def main():
     logger.info("Бот запущен с защитой от DDoS!")
     logger.info(f"Rate limit: 15 запросов в минуту на пользователя")
     logger.info(f"Admin ID: {ADMIN_USER_ID}")
+    logger.info("Команды для подписки: /subscribe, /unsubscribe")
 
     # Используем polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
