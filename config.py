@@ -6,7 +6,7 @@ load_dotenv()
 # Telegram
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 # 0 = публичный доступ для всех, твой ID = админ
-ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '0'))  # Твой ID: 1160991959
+ADMIN_USER_ID = 1160991959
 
 # Gmail IMAP
 EMAIL_USER = os.getenv('EMAIL_USER')
