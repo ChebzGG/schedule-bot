@@ -5,13 +5,14 @@ from typing import Dict, Set
 from collections import defaultdict
 from functools import wraps
 import hashlib
-import hmac
 import json
 import os
 import threading
+import signal
+import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from config import TELEGRAM_TOKEN, ADMIN_USER_ID, EMAIL_USER, EMAIL_PASSWORD, IMAP_SERVER, EMAIL_CHECK_INTERVAL
 from email_parser import EmailParser
 from schedule_manager import ScheduleManager
@@ -121,9 +122,12 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_health_server():
     port = int(os.getenv('PORT', 8080))
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    logger.info(f"Health server started on port {port}")
-    server.serve_forever()
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        logger.info(f"Health server started on port {port}")
+        server.serve_forever()
+    except OSError as e:
+        logger.warning(f"Health server не запущен (порт {port} занят): {e}")
 
 
 # === АНТИ-DDoS ЗАЩИТА ===
@@ -200,6 +204,10 @@ rate_limiter = RateLimiter(max_requests=15, time_window=60)
 user_blacklist = UserBlacklist()
 request_logger = RequestLogger()
 notification_manager = NotificationManager()
+
+# === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
+application = None
+shutdown_event = asyncio.Event()
 
 
 # === ДЕКОРАТОРЫ ДОСТУПА ===
@@ -295,54 +303,65 @@ def get_day_name(day_code: str) -> str:
 
 
 # === АВТОМАТИЧЕСКАЯ ПРОВЕРКА ПОЧТЫ ===
-async def check_new_schedules(context: ContextTypes.DEFAULT_TYPE):
+async def check_new_schedules():
     """Периодическая проверка новых расписаний в почте"""
-    try:
-        logger.info("🔍 Проверка новых писем с расписанием...")
+    global application
 
-        emails_data = await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: email_parser.search_emails_with_hash(days_back=2, max_emails=20)
-        )
+    await asyncio.sleep(10)
 
-        new_schedules_found = []
+    while not shutdown_event.is_set():
+        try:
+            logger.info("🔍 Проверка новых писем с расписанием...")
 
-        for email_data in emails_data:
-            email_hash = email_data['hash']
+            emails_data = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: email_parser.search_emails_with_hash(days_back=2, max_emails=20)
+            )
 
-            if notification_manager.is_email_processed(email_hash):
-                continue
+            new_schedules_found = []
 
-            body = email_parser.extract_body(email_data['message'])
-            if not body:
+            for email_data in emails_data:
+                email_hash = email_data['hash']
+
+                if notification_manager.is_email_processed(email_hash):
+                    continue
+
+                body = email_parser.extract_body(email_data['message'])
+                if not body:
+                    notification_manager.mark_email_processed(email_hash)
+                    continue
+
+                parsed = email_parser.parse_schedule_from_text(body)
+                if not parsed:
+                    notification_manager.mark_email_processed(email_hash)
+                    continue
+
+                new_schedules_found.append({
+                    'hash': email_hash,
+                    'data': parsed,
+                    'subject': email_data['subject']
+                })
+
+                schedule_manager.update_schedule_from_email(parsed)
                 notification_manager.mark_email_processed(email_hash)
-                continue
 
-            parsed = email_parser.parse_schedule_from_text(body)
-            if not parsed:
-                notification_manager.mark_email_processed(email_hash)
-                continue
+                logger.info(f"✅ Найдено новое расписание: {email_data['subject']}")
 
-            new_schedules_found.append({
-                'hash': email_hash,
-                'data': parsed,
-                'subject': email_data['subject']
-            })
+            if new_schedules_found and application:
+                await notify_subscribers(new_schedules_found)
 
-            schedule_manager.update_schedule_from_email(parsed)
-            notification_manager.mark_email_processed(email_hash)
+        except Exception as e:
+            logger.error(f"Ошибка при проверке почты: {e}")
 
-            logger.info(f"✅ Найдено новое расписание: {email_data['subject']}")
-
-        if new_schedules_found:
-            await notify_subscribers(context, new_schedules_found)
-
-    except Exception as e:
-        logger.error(f"Ошибка при проверке почты: {e}")
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=EMAIL_CHECK_INTERVAL)
+        except asyncio.TimeoutError:
+            continue
 
 
-async def notify_subscribers(context: ContextTypes.DEFAULT_TYPE, new_schedules: list):
+async def notify_subscribers(new_schedules: list):
     """Отправляет уведомления всем подписчикам о новом расписании"""
+    global application
     subscribers = notification_manager.get_subscribers()
 
     if not subscribers:
@@ -377,7 +396,7 @@ async def notify_subscribers(context: ContextTypes.DEFAULT_TYPE, new_schedules: 
 
             for chat_id in subscribers:
                 try:
-                    await context.bot.send_message(
+                    await application.bot.send_message(
                         chat_id=chat_id,
                         text=message_text,
                         reply_markup=keyboard,
@@ -835,7 +854,16 @@ async def _try_load_from_email(days_back=3):
     return False
 
 
-def main():
+def signal_handler(sig, frame):
+    """Обработчик сигналов для graceful shutdown"""
+    logger.info(f"Получен сигнал {sig}, завершаю работу...")
+    shutdown_event.set()
+
+
+async def main_async():
+    """Асинхронная main функция"""
+    global application
+
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN не задан!")
         return
@@ -843,12 +871,18 @@ def main():
     os.makedirs('cache', exist_ok=True)
     os.makedirs('Fonts', exist_ok=True)
 
+    # Регистрируем обработчики сигналов
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Запускаем health-check сервер в отдельном потоке
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
 
+    # Создаем приложение
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Публичные команды
+    # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("update", update_command))
     application.add_handler(CommandHandler("cache", cache_info_command))
@@ -856,28 +890,52 @@ def main():
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("subscribe", subscribe_command))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
-
-    # Админские команды
     application.add_handler(CommandHandler("block", block_user_command))
     application.add_handler(CommandHandler("unblock", unblock_user_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
-
-    # Обработчик callback кнопок
     application.add_handler(CallbackQueryHandler(button_handler))
-
-    # Настраиваем периодическую проверку почты
-    job_queue = application.job_queue
-    job_queue.run_repeating(
-        check_new_schedules,
-        interval=EMAIL_CHECK_INTERVAL,
-        first=10
-    )
 
     logger.info("Бот запущен с авто-проверкой почты!")
     logger.info(f"Интервал проверки: {EMAIL_CHECK_INTERVAL} сек")
     logger.info(f"Подписчиков: {len(notification_manager.get_subscribers())}")
 
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Запускаем фоновую задачу проверки почты
+    email_check_task = asyncio.create_task(check_new_schedules())
+
+    # Запускаем бота
+    await application.initialize()
+    await application.start()
+
+    # Запускаем polling в отдельной задаче
+    polling_task = asyncio.create_task(
+        application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True))
+
+    # Ждем сигнала завершения
+    await shutdown_event.wait()
+
+    # Graceful shutdown
+    logger.info("Остановка бота...")
+    polling_task.cancel()
+    email_check_task.cancel()
+
+    try:
+        await polling_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await email_check_task
+    except asyncio.CancelledError:
+        pass
+
+    await application.updater.stop()
+    await application.stop()
+    await application.shutdown()
+    logger.info("Бот остановлен")
+
+
+def main():
+    """Точка входа"""
+    asyncio.run(main_async())
 
 
 if __name__ == '__main__':
