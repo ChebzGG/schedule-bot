@@ -151,12 +151,21 @@ class ScheduleManager:
         }
 
     def clear_cache(self):
+        """Только очищает кэш расписания, подписчиков не трогает!"""
         self._cache_memory = None
         self._cache_mtime = 0
         self.get_cache_age_text.cache_clear()
+
+        # Удаляем только файлы расписания
         for f in [self.cache_file, self.cache_meta_file]:
-            try: os.remove(f)
-            except: pass
+            try:
+                os.remove(f)
+                logger.info(f"Удалён файл: {f}")
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logger.error(f"Ошибка удаления {f}: {e}")
+
         return True
 
     def get_cache_info(self):

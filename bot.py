@@ -120,6 +120,97 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 
+# === SELF-PING ЧЕРЕЗ TELEGRAM (обход sleeping) ===
+class TelegramSelfPing:
+    """Отправляет периодические обновления в Telegram чтобы держать сервер awake"""
+
+    def __init__(self, bot, chat_id: int, interval_minutes: int = 10):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.interval = interval_minutes * 60  # в секундах
+        self.message_id = None
+        self.running = False
+        self._task = None
+        self._dot_state = True  # True = показываем точку, False = убираем
+
+    async def start(self):
+        """Запускает self-ping"""
+        self.running = True
+        # Отправляем начальное служебное сообщение
+        try:
+            msg = await self.bot.send_message(
+                chat_id=self.chat_id,
+                text="🟢 Бот активен\n⏱️ Последнее обновление: инициализация..."
+            )
+            self.message_id = msg.message_id
+            logger.info(f"Self-ping сообщение создано: {self.message_id}")
+        except Exception as e:
+            logger.error(f"Не удалось создать self-ping сообщение: {e}")
+            return
+
+        self._task = asyncio.create_task(self._ping_loop())
+
+    async def stop(self):
+        """Останавливает self-ping"""
+        self.running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _ping_loop(self):
+        """Цикл обновления сообщения"""
+        counter = 0
+        while self.running and not shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=self.interval)
+                break  # Получен сигнал завершения
+            except asyncio.TimeoutError:
+                pass  # Продолжаем работу
+
+            if not self.running:
+                break
+
+            try:
+                counter += 1
+                now = datetime.now().strftime("%H:%M:%S")
+
+                # Чередуем состояние для создания активности
+                self._dot_state = not self._dot_state
+                dot = "●" if self._dot_state else "○"
+
+                # Обновляем сообщение
+                text = (
+                    f"🟢 Бот активен {dot}\n"
+                    f"⏱️ Обновление #{counter}\n"
+                    f"🕐 {now}\n"
+                    f"💓 Пинг: {self.interval // 60} мин"
+                )
+
+                await self.bot.edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=self.message_id,
+                    text=text
+                )
+                logger.debug(f"Self-ping #{counter} отправлен в {now}")
+
+            except Exception as e:
+                logger.warning(f"Ошибка self-ping: {e}")
+                # Если сообщение удалено, создадим новое
+                if "message to edit not found" in str(e).lower():
+                    try:
+                        msg = await self.bot.send_message(
+                            chat_id=self.chat_id,
+                            text="🟢 Бот активен (пересоздано)..."
+                        )
+                        self.message_id = msg.message_id
+                    except Exception as e2:
+                        logger.error(f"Не удалось пересоздать сообщение: {e2}")
+
+        logger.info("Self-ping остановлен")
+
 def run_health_server():
     port = int(os.getenv('PORT', 8080))
     try:
@@ -636,9 +727,11 @@ async def cache_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @public_command
 async def clear_cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Только очищает кэш расписания, подписчиков не трогает"""
     schedule_manager.clear_cache()
     image_cache.clear()
-    await update.message.reply_text("🗑️ Кэш полностью очищен.")
+    # Подписчики НЕ трогаем!
+    await update.message.reply_text("🗑️ Кэш расписания очищен.\n👥 Подписчики сохранены.")
 
 
 @public_command
@@ -690,6 +783,8 @@ async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # === АДМИНСКИЕ КОМАНДЫ ===
+# === НОВЫЕ АДМИН-КОМАНДЫ ===
+
 async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
     query = update.callback_query
     user_id = update.effective_user.id
@@ -698,43 +793,274 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
         await query.edit_message_text("⛔ Только для администратора.")
         return
 
+    # === ГЛАВНОЕ МЕНЮ АДМИНА ===
     if data == 'admin_panel':
         keyboard = [
-            [InlineKeyboardButton("📊 Статистика", callback_data='admin_stats')],
-            [InlineKeyboardButton("🗑️ Очистить кэш", callback_data='admin_clear_cache')],
+            [InlineKeyboardButton("📦 Управление кэшем", callback_data='admin_cache_menu')],
+            [InlineKeyboardButton("👥 Управление подписчиками", callback_data='admin_subs_menu')],
             [InlineKeyboardButton("🔄 Принудительное обновление", callback_data='admin_force_update')],
             [InlineKeyboardButton("🚫 Заблокировать пользователя", callback_data='admin_block_user')],
-            [InlineKeyboardButton("🔔 Рассылка подписчикам", callback_data='admin_broadcast')],
+            [InlineKeyboardButton("📢 Рассылка подписчикам", callback_data='admin_broadcast')],
+            [InlineKeyboardButton("📊 Статистика", callback_data='admin_stats')],
             [InlineKeyboardButton("◀️ Назад", callback_data='back')]
         ]
         await query.edit_message_text(
-            "⚙️ Админ-панель\n\nВыберите действие:",
+            "⚙️ Админ-панель\n\nВыберите раздел:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
+    # === МЕНЮ КЭША ===
+    elif data == 'admin_cache_menu':
+        cache_info = schedule_manager.get_cache_info()
+
+        text = (
+            f"📦 <b>Управление кэшем расписания</b>\n\n"
+            f"📅 Дат в кэше: <code>{len(cache_info['dates'])}</code>\n"
+            f"📚 Всего уроков: <code>{cache_info['total_lessons']}</code>\n"
+            f"🕐 Обновлено: {cache_info['age_text']}\n"
+            f"{'✅' if cache_info['is_fresh'] else '⚠️'} Статус: {'Свежий' if cache_info['is_fresh'] else 'Устарел'}\n\n"
+        )
+
+        # Показываем последние 10 дат
+        if cache_info['dates']:
+            recent_dates = sorted(cache_info['dates'])[-10:]
+            text += "<b>Последние даты:</b>\n"
+            for d in recent_dates:
+                try:
+                    date_obj = datetime.fromisoformat(d)
+                    text += f"• <code>{date_obj.strftime('%d.%m.%Y')}</code>\n"
+                except:
+                    text += f"• <code>{d}</code>\n"
+
+        keyboard = [
+            [InlineKeyboardButton("📋 Показать весь кэш", callback_data='admin_cache_view_full')],
+            [InlineKeyboardButton("🗑️ Очистить кэш", callback_data='admin_cache_clear')],
+            [InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]
+        ]
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+
+    # === ПРОСМОТР ВСЕГО КЭША ===
+    elif data == 'admin_cache_view_full':
+        cache = schedule_manager._load_cache()
+
+        if not cache:
+            await query.edit_message_text(
+                "📭 Кэш пуст",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ Назад", callback_data='admin_cache_menu')
+                ]])
+            )
+            return
+
+        # Формируем текст с кэшем (разбиваем на части если большой)
+        text = "📦 <b>Полный кэш расписания:</b>\n\n"
+
+        for date_str in sorted(cache.keys()):
+            try:
+                date_obj = datetime.fromisoformat(date_str)
+                day_code = ('пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс')[date_obj.weekday()]
+                day_names = {'пн': 'Пн', 'вт': 'Вт', 'ср': 'Ср', 'чт': 'Чт', 'пт': 'Пт', 'сб': 'Сб', 'вс': 'Вс'}
+                date_formatted = f"{date_obj.strftime('%d.%m.%Y')} ({day_names.get(day_code, day_code)})"
+            except:
+                date_formatted = date_str
+
+            lessons = cache[date_str]
+            text += f"📅 <b>{date_formatted}</b> — {len(lessons)} уроков\n"
+
+            for lesson in lessons[:5]:  # Показываем первые 5 уроков
+                text += f"  <code>{lesson['number']}.</code> {lesson['timebegin']}-{lesson['timeend']} {lesson['name'][:30]}\n"
+
+            if len(lessons) > 5:
+                text += f"  <i>... и ещё {len(lessons) - 5} уроков</i>\n"
+            text += "\n"
+
+            # Telegram ограничение ~4000 символов
+            if len(text) > 3500:
+                text += "<i>... (кэш обрезан, слишком большой)</i>"
+                break
+
+        keyboard = [
+            [InlineKeyboardButton("🗑️ Очистить кэш", callback_data='admin_cache_clear')],
+            [InlineKeyboardButton("◀️ Назад", callback_data='admin_cache_menu')]
+        ]
+
+        # Если текст слишком длинный, отправляем как файл
+        if len(text) > 4000:
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+                f.write(
+                    text.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace(
+                        '<i>', '').replace('</i>', ''))
+                temp_path = f.name
+
+            await query.delete_message()
+            with open(temp_path, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=f,
+                    caption="📦 Полный кэш расписания",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            os.remove(temp_path)
+        else:
+            await query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+
+    # === ОЧИСТКА КЭША (только расписание!) ===
+    elif data == 'admin_cache_clear':
+        schedule_manager.clear_cache()
+        image_cache.clear()
+        # Подписчики НЕ трогаем!
+
+        await query.edit_message_text(
+            "✅ <b>Кэш расписания очищен!</b>\n\n"
+            "📅 Даты и уроки удалены\n"
+            "👥 Подписчики сохранены\n"
+            "🖼️ Кэш изображений очищен",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📦 В меню кэша", callback_data='admin_cache_menu')],
+                [InlineKeyboardButton("⚙️ В админ-панель", callback_data='admin_panel')]
+            ]),
+            parse_mode='HTML'
+        )
+
+    # === МЕНЮ ПОДПИСЧИКОВ ===
+    elif data == 'admin_subs_menu':
+        notif_stats = notification_manager.get_stats()
+        subscribers = notification_manager.get_subscribers()
+
+        text = (
+            f"👥 <b>Управление подписчиками</b>\n\n"
+            f"🔔 Всего подписчиков: <code>{notif_stats['subscribers_count']}</code>\n"
+            f"📧 Обработано писем: <code>{notif_stats['processed_emails']}</code>\n\n"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("📋 Список подписчиков", callback_data='admin_subs_view')],
+            [InlineKeyboardButton("🧹 Очистить неактивных", callback_data='admin_subs_cleanup')],
+            [InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]
+        ]
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+
+    # === ПРОСМОТР ПОДПИСЧИКОВ ===
+    elif data == 'admin_subs_view':
+        subscribers = notification_manager.get_subscribers()
+
+        if not subscribers:
+            await query.edit_message_text(
+                "👥 Нет подписчиков",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ Назад", callback_data='admin_subs_menu')
+                ]])
+            )
+            return
+
+        text = f"👥 <b>Список подписчиков ({len(subscribers)}):</b>\n\n"
+
+        for i, chat_id in enumerate(subscribers, 1):
+            # Пытаемся получить информацию о пользователе
+            try:
+                chat = await context.bot.get_chat(chat_id)
+                username = f"@{chat.username}" if chat.username else "нет username"
+                first_name = chat.first_name or "Без имени"
+                text += f"{i}. <code>{chat_id}</code> — {first_name} ({username})\n"
+            except Exception:
+                text += f"{i}. <code>{chat_id}</code> — (недоступен)\n"
+
+        keyboard = [
+            [InlineKeyboardButton("🧹 Очистить неактивных", callback_data='admin_subs_cleanup')],
+            [InlineKeyboardButton("◀️ Назад", callback_data='admin_subs_menu')]
+        ]
+
+        # Если слишком длинно — отправляем файлом
+        if len(text) > 4000:
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+                f.write(text.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', ''))
+                temp_path = f.name
+
+            await query.delete_message()
+            with open(temp_path, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=f,
+                    caption=f"👥 Список подписчиков ({len(subscribers)})",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            os.remove(temp_path)
+        else:
+            await query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+
+    # === ОЧИСТКА НЕАКТИВНЫХ ПОДПИСЧИКОВ ===
+    elif data == 'admin_subs_cleanup':
+        """Проверяет и удаляет заблокировавших бота"""
+        subscribers = notification_manager.get_subscribers()
+        removed = []
+
+        await query.edit_message_text("🧹 Проверяю подписчиков...")
+
+        for chat_id in subscribers[:]:  # Копия списка
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+            except Exception as e:
+                # Бот заблокирован или пользователь не найден
+                if "blocked" in str(e).lower() or "not found" in str(e).lower() or "deactivated" in str(e).lower():
+                    notification_manager.remove_subscriber(chat_id)
+                    removed.append(chat_id)
+
+        if removed:
+            text = f"✅ Удалено неактивных: <code>{len(removed)}</code>\n\n"
+            text += "Удалённые ID:\n" + "\n".join(f"<code>{rid}</code>" for rid in removed[:20])
+            if len(removed) > 20:
+                text += f"\n... и ещё {len(removed) - 20}"
+        else:
+            text = "✅ Все подписчики активны, удалять некого"
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Назад", callback_data='admin_subs_menu')
+            ]]),
+            parse_mode='HTML'
+        )
+
+    # === ОСТАЛЬНЫЕ КНОПКИ (без изменений) ===
     elif data == 'admin_stats':
         cache_info = schedule_manager.get_cache_info()
         notif_stats = notification_manager.get_stats()
         stats = (
             f"📊 Статистика бота:\n\n"
-            f"📅 Дат в кэше: {len(cache_info['dates'])}\n"
-            f"📚 Всего уроков: {cache_info['total_lessons']}\n"
-            f"🕐 Возраст кэша: {cache_info['age_text']}\n"
-            f"✅ Кэш свежий: {cache_info['is_fresh']}\n\n"
-            f"🔔 Подписчиков: {notif_stats['subscribers_count']}\n"
-            f"📧 Обработано писем: {notif_stats['processed_emails']}\n"
-            f"🚫 Заблокировано: {len(user_blacklist.blacklist)} пользователей"
+            f"<b>Кэш расписания:</b>\n"
+            f"📅 Дат: <code>{len(cache_info['dates'])}</code>\n"
+            f"📚 Уроков: <code>{cache_info['total_lessons']}</code>\n"
+            f"🕐 Возраст: {cache_info['age_text']}\n\n"
+            f"<b>Подписчики:</b>\n"
+            f"🔔 Активных: <code>{notif_stats['subscribers_count']}</code>\n"
+            f"📧 Обработано писем: <code>{notif_stats['processed_emails']}</code>\n\n"
+            f"<b>Безопасность:</b>\n"
+            f"🚫 Заблокировано: <code>{len(user_blacklist.blacklist)}</code>"
         )
-        await query.edit_message_text(stats, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]
-        ]))
-
-    elif data == 'admin_clear_cache':
-        schedule_manager.clear_cache()
-        image_cache.clear()
         await query.edit_message_text(
-            "✅ Кэш очищен!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]])
+            stats,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')
+            ]]),
+            parse_mode='HTML'
         )
 
     elif data == 'admin_force_update':
@@ -742,8 +1068,11 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
         if await _try_load_from_email(days_back=14):
             cache_info = schedule_manager.get_cache_info()
             await query.edit_message_text(
-                f"✅ Расписание обновлено!\n📅 Дат: {len(cache_info['dates'])}\n📚 Уроков: {cache_info['total_lessons']}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]])
+                f"✅ Расписание обновлено!\n"
+                f"📅 Дат: <code>{len(cache_info['dates'])}</code>\n"
+                f"📚 Уроков: <code>{cache_info['total_lessons']}</code>",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]]),
+                parse_mode='HTML'
             )
         else:
             await query.edit_message_text(
@@ -754,19 +1083,20 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
     elif data == 'admin_block_user':
         await query.edit_message_text(
             "🚫 Для блокировки пользователя используйте команду:\n"
-            "/block <user_id>\n\n"
-            "Пример: /block 123456789",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]])
+            "<code>/block &lt;user_id&gt;</code>\n\n"
+            "Пример: <code>/block 123456789</code>",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]]),
+            parse_mode='HTML'
         )
 
     elif data == 'admin_broadcast':
         await query.edit_message_text(
             "📢 Для рассылки сообщения всем подписчикам используйте:\n"
-            "/broadcast <текст>\n\n"
-            "Пример: /broadcast Внимание! Завтра изменения в расписании.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]])
+            "<code>/broadcast &lt;текст&gt;</code>\n\n"
+            "Пример: <code>/broadcast Внимание! Завтра изменения в расписании.</code>",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]]),
+            parse_mode='HTML'
         )
-
 
 @admin_command
 async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -882,6 +1212,16 @@ async def main_async():
     # Создаем приложение
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # === ИНИЦИАЛИЗАЦИЯ SELF-PING ===
+    self_ping = None
+    if ADMIN_USER_ID:
+        self_ping = TelegramSelfPing(
+            bot=application.bot,
+            chat_id=ADMIN_USER_ID,  # Отправляем в личку админу
+            interval_minutes=10  # Каждые 10 минут
+        )
+        logger.info(f"Self-ping настроен: чат {ADMIN_USER_ID}, интервал 10 мин")
+
     # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("update", update_command))
@@ -895,12 +1235,16 @@ async def main_async():
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("Бот запущен с авто-проверкой почты!")
-    logger.info(f"Интервал проверки: {EMAIL_CHECK_INTERVAL} сек")
+    logger.info("Бот запущен с авто-проверкой почты и self-ping!")
+    logger.info(f"Интервал проверки почты: {EMAIL_CHECK_INTERVAL} сек")
     logger.info(f"Подписчиков: {len(notification_manager.get_subscribers())}")
 
-    # Запускаем фоновую задачу проверки почты
+    # Запускаем фоновые задачи
     email_check_task = asyncio.create_task(check_new_schedules())
+
+    # Запускаем self-ping после инициализации бота
+    if self_ping:
+        await self_ping.start()
 
     # Запускаем бота
     await application.initialize()
@@ -915,6 +1259,11 @@ async def main_async():
 
     # Graceful shutdown
     logger.info("Остановка бота...")
+
+    # Останавливаем self-ping
+    if self_ping:
+        await self_ping.stop()
+
     polling_task.cancel()
     email_check_task.cancel()
 
