@@ -151,7 +151,6 @@ class ScheduleManager:
         }
 
     def clear_cache(self):
-        """Только очищает кэш расписания, подписчиков не трогает!"""
         self._cache_memory = None
         self._cache_mtime = 0
         self.get_cache_age_text.cache_clear()

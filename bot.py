@@ -1039,7 +1039,7 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             parse_mode='HTML'
         )
 
-    # === ОСТАЛЬНЫЕ КНОПКИ (без изменений) ===
+    # === ОСТАЛЬНЫЕ КНОПКИ ===
     elif data == 'admin_stats':
         cache_info = schedule_manager.get_cache_info()
         notif_stats = notification_manager.get_stats()
