@@ -1065,11 +1065,13 @@ async def main_async():
     await application.initialize()
     await application.start()
 
+    await application.bot.delete_webhook(drop_pending_updates=True)
+
     polling_task = asyncio.create_task(
         application.updater.start_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
-            poll_interval=2.0,  # Реже опрашивать (Render не любит частые запросы)
+            poll_interval=2.0,
             timeout=30
         )
     )
