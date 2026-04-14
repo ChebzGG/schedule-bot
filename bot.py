@@ -119,98 +119,6 @@ class HealthHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-
-# === SELF-PING ЧЕРЕЗ TELEGRAM (обход sleeping) ===
-class TelegramSelfPing:
-    """Отправляет периодические обновления в Telegram чтобы держать сервер awake"""
-
-    def __init__(self, bot, chat_id: int, interval_minutes: int = 10):
-        self.bot = bot
-        self.chat_id = chat_id
-        self.interval = interval_minutes * 60  # в секундах
-        self.message_id = None
-        self.running = False
-        self._task = None
-        self._dot_state = True  # True = показываем точку, False = убираем
-
-    async def start(self):
-        """Запускает self-ping"""
-        self.running = True
-        # Отправляем начальное служебное сообщение
-        try:
-            msg = await self.bot.send_message(
-                chat_id=self.chat_id,
-                text="🟢 Бот активен\n⏱️ Последнее обновление: инициализация..."
-            )
-            self.message_id = msg.message_id
-            logger.info(f"Self-ping сообщение создано: {self.message_id}")
-        except Exception as e:
-            logger.error(f"Не удалось создать self-ping сообщение: {e}")
-            return
-
-        self._task = asyncio.create_task(self._ping_loop())
-
-    async def stop(self):
-        """Останавливает self-ping"""
-        self.running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-
-    async def _ping_loop(self):
-        """Цикл обновления сообщения"""
-        counter = 0
-        while self.running and not shutdown_event.is_set():
-            try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=self.interval)
-                break  # Получен сигнал завершения
-            except asyncio.TimeoutError:
-                pass  # Продолжаем работу
-
-            if not self.running:
-                break
-
-            try:
-                counter += 1
-                now = datetime.now().strftime("%H:%M:%S")
-
-                # Чередуем состояние для создания активности
-                self._dot_state = not self._dot_state
-                dot = "●" if self._dot_state else "○"
-
-                # Обновляем сообщение
-                text = (
-                    f"🟢 Бот активен {dot}\n"
-                    f"⏱️ Обновление #{counter}\n"
-                    f"🕐 {now}\n"
-                    f"💓 Пинг: {self.interval // 60} мин"
-                )
-
-                await self.bot.edit_message_text(
-                    chat_id=self.chat_id,
-                    message_id=self.message_id,
-                    text=text
-                )
-                logger.debug(f"Self-ping #{counter} отправлен в {now}")
-
-            except Exception as e:
-                logger.warning(f"Ошибка self-ping: {e}")
-                # Если сообщение удалено, создадим новое
-                if "message to edit not found" in str(e).lower():
-                    try:
-                        msg = await self.bot.send_message(
-                            chat_id=self.chat_id,
-                            text="🟢 Бот активен (пересоздано)..."
-                        )
-                        self.message_id = msg.message_id
-                    except Exception as e2:
-                        logger.error(f"Не удалось пересоздать сообщение: {e2}")
-
-        logger.info("Self-ping остановлен")
-
 def run_health_server():
     port = int(os.getenv('PORT', 8080))
     try:
@@ -1212,16 +1120,6 @@ async def main_async():
     # Создаем приложение
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # === ИНИЦИАЛИЗАЦИЯ SELF-PING ===
-    self_ping = None
-    if ADMIN_USER_ID:
-        self_ping = TelegramSelfPing(
-            bot=application.bot,
-            chat_id=ADMIN_USER_ID,  # Отправляем в личку админу
-            interval_minutes=10  # Каждые 10 минут
-        )
-        logger.info(f"Self-ping настроен: чат {ADMIN_USER_ID}, интервал 10 мин")
-
     # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("update", update_command))
@@ -1235,16 +1133,13 @@ async def main_async():
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("Бот запущен с авто-проверкой почты и self-ping!")
+    logger.info("Бот запущен с авто-проверкой почты!")
     logger.info(f"Интервал проверки почты: {EMAIL_CHECK_INTERVAL} сек")
     logger.info(f"Подписчиков: {len(notification_manager.get_subscribers())}")
 
     # Запускаем фоновые задачи
     email_check_task = asyncio.create_task(check_new_schedules())
 
-    # Запускаем self-ping после инициализации бота
-    if self_ping:
-        await self_ping.start()
 
     # Запускаем бота
     await application.initialize()
@@ -1260,9 +1155,6 @@ async def main_async():
     # Graceful shutdown
     logger.info("Остановка бота...")
 
-    # Останавливаем self-ping
-    if self_ping:
-        await self_ping.stop()
 
     polling_task.cancel()
     email_check_task.cancel()
