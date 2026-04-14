@@ -18,6 +18,10 @@ TIMES_FILE = 'times.json'
 CACHE_FILE = 'cache/schedule.json'
 EMAIL_DAYS_BACK = 3
 
+# Supabase (для хранения подписчиков)
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+
 
 NOTIFY_CHAT_IDS = []  # Список ID чатов для уведомлений (заполняется автоматически)
 SUBSCRIBERS_FILE = 'cache/subscribers.json'  # Файл с подписчиками
