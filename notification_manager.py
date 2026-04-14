@@ -29,8 +29,29 @@ class NotificationManager:
             return
 
         try:
-            self.supabase = create_client(self.supabase_url, self.supabase_key)
+            # Новый API для supabase-py 2.x
+            from supabase.client import ClientOptions
+
+            options = ClientOptions(
+                schema="public",
+                headers={},
+                auto_refresh_token=True,
+                persist_session=True
+            )
+
+            self.supabase = create_client(
+                self.supabase_url,
+                self.supabase_key,
+                options=options
+            )
             logger.info("✅ Подключение к Supabase установлено")
+        except ImportError:
+            # Fallback для старых версий
+            try:
+                self.supabase = create_client(self.supabase_url, self.supabase_key)
+                logger.info("✅ Подключение к Supabase установлено (legacy)")
+            except Exception as e:
+                logger.error(f"❌ Ошибка подключения (legacy): {e}")
         except Exception as e:
             logger.error(f"❌ Ошибка подключения к Supabase: {e}")
 
