@@ -22,6 +22,8 @@ class NotificationManager:
         self._init_supabase()
         self._ensure_tables_exist()
 
+    # notification_manager.py — замените метод _init_supabase
+
     def _init_supabase(self):
         """Инициализирует подключение к Supabase"""
         if not self.supabase_url or not self.supabase_key:
@@ -29,31 +31,13 @@ class NotificationManager:
             return
 
         try:
-            # Новый API для supabase-py 2.x
-            from supabase.client import ClientOptions
-
-            options = ClientOptions(
-                schema="public",
-                headers={},
-                auto_refresh_token=True,
-                persist_session=True
-            )
-
-            self.supabase = create_client(
-                self.supabase_url,
-                self.supabase_key,
-                options=options
-            )
+            # Простое подключение для любой версии
+            self.supabase = create_client(self.supabase_url, self.supabase_key)
             logger.info("✅ Подключение к Supabase установлено")
-        except ImportError:
-            # Fallback для старых версий
-            try:
-                self.supabase = create_client(self.supabase_url, self.supabase_key)
-                logger.info("✅ Подключение к Supabase установлено (legacy)")
-            except Exception as e:
-                logger.error(f"❌ Ошибка подключения (legacy): {e}")
         except Exception as e:
             logger.error(f"❌ Ошибка подключения к Supabase: {e}")
+            self.supabase = None
+
 
     def _ensure_tables_exist(self):
         """Проверяет/создаёт таблицы в Supabase"""

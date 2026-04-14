@@ -1065,10 +1065,14 @@ async def main_async():
     await application.initialize()
     await application.start()
 
-    # Запускаем polling в отдельной задаче
     polling_task = asyncio.create_task(
-        application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True))
-
+        application.updater.start_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            poll_interval=2.0,  # Реже опрашивать (Render не любит частые запросы)
+            timeout=30
+        )
+    )
     # Ждем сигнала завершения
     await shutdown_event.wait()
 
