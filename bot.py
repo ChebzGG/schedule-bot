@@ -1019,7 +1019,6 @@ def signal_handler(sig, frame):
 
 
 async def main_async():
-    """Асинхронная main функция"""
     global application
 
     if not TELEGRAM_TOKEN:
@@ -1029,15 +1028,18 @@ async def main_async():
     os.makedirs('cache', exist_ok=True)
     os.makedirs('Fonts', exist_ok=True)
 
-    # Регистрируем обработчики сигналов
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Запускаем health-check сервер в отдельном потоке
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
 
-    # Создаем приложение
+    # === СИНХРОНИЗАЦИЯ ПОДПИСЧИКОВ ПРИ СТАРТЕ ===
+    logger.info("🔄 Синхронизация подписчиков с Supabase...")
+    notification_manager.sync_to_supabase()
+    notification_manager._load_to_cache()
+    logger.info(f"👥 Активных подписчиков: {len(notification_manager.get_subscribers())}")
+
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # Регистрируем обработчики
