@@ -1019,6 +1019,7 @@ def signal_handler(sig, frame):
 
 
 async def main_async():
+    """Асинхронная main функция"""
     global application
 
     if not TELEGRAM_TOKEN:
@@ -1028,18 +1029,21 @@ async def main_async():
     os.makedirs('cache', exist_ok=True)
     os.makedirs('Fonts', exist_ok=True)
 
+    # Регистрируем обработчики сигналов
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Запускаем health-check сервер в отдельном потоке
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
 
-    # === СИНХРОНИЗАЦИЯ ПОДПИСЧИКОВ ПРИ СТАРТЕ ===
+    # Синхронизация подписчиков при старте
     logger.info("🔄 Синхронизация подписчиков с Supabase...")
     notification_manager.sync_to_supabase()
     notification_manager._load_to_cache()
     logger.info(f"👥 Активных подписчиков: {len(notification_manager.get_subscribers())}")
 
+    # Создаем приложение
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # Регистрируем обработчики
@@ -1062,12 +1066,13 @@ async def main_async():
     # Запускаем фоновые задачи
     email_check_task = asyncio.create_task(check_new_schedules())
 
-
     # Запускаем бота
     await application.initialize()
-    await application.start()
 
+    # Удаляем webhook ДО старта polling (важно!)
     await application.bot.delete_webhook(drop_pending_updates=True)
+
+    await application.start()
 
     polling_task = asyncio.create_task(
         application.updater.start_polling(
@@ -1077,12 +1082,12 @@ async def main_async():
             timeout=30
         )
     )
+
     # Ждем сигнала завершения
     await shutdown_event.wait()
 
     # Graceful shutdown
     logger.info("Остановка бота...")
-
 
     polling_task.cancel()
     email_check_task.cancel()
@@ -1091,10 +1096,15 @@ async def main_async():
         await polling_task
     except asyncio.CancelledError:
         pass
+    except Exception as e:
+        logger.error(f"Ошибка при остановке polling: {e}")
+
     try:
         await email_check_task
     except asyncio.CancelledError:
         pass
+    except Exception as e:
+        logger.error(f"Ошибка при остановке email checker: {e}")
 
     await application.updater.stop()
     await application.stop()
