@@ -43,7 +43,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 
-# === SELF-PING ЧЕРЕЗ TELEGRAM ===
+# === SELF-PING ЧЕРЕЗ TELEGRAM
 class TelegramSelfPing:
     def __init__(self, bot, chat_id: int, interval_minutes: int = 10):
         self.bot = bot

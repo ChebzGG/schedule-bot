@@ -15,7 +15,7 @@ IMAP_SERVER = os.getenv('IMAP_SERVER', 'imap.gmail.com')
 # Upstash Redis (сторонний сервис, данные не пропадают)
 UPSTASH_REDIS_URL = os.getenv('UPSTASH_REDIS_URL')
 
-# Настройки
+
 TIMES_FILE = 'times.json'
 CACHE_FILE = 'cache/schedule.json'
 EMAIL_DAYS_BACK = 3

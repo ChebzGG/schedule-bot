@@ -98,7 +98,7 @@ class Database:
             logger.error(f"Ошибка подсчёта хешей: {e}")
             return len(self._processed_cache)
 
-    # === Статистика ===
+    # === Статистика
     def get_stats(self):
         return {
             'subscribers_count': len(self.get_subscribers()),
