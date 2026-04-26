@@ -13,7 +13,11 @@ import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from config import TELEGRAM_TOKEN, ADMIN_USER_ID, EMAIL_USER, EMAIL_PASSWORD, IMAP_SERVER, EMAIL_CHECK_INTERVAL
+from config import (
+    TELEGRAM_TOKEN, ADMIN_USER_ID, EMAIL_USER, EMAIL_PASSWORD,
+    IMAP_SERVER, EMAIL_CHECK_INTERVAL
+)
+from database import Database
 from email_parser import EmailParser
 from schedule_manager import ScheduleManager
 from image_generator import ScheduleImageGenerator
@@ -25,87 +29,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-
-# === NOTIFICATION MANAGER ===
-class NotificationManager:
-    def __init__(self, subscribers_file: str = 'cache/subscribers.json'):
-        self.subscribers_file = subscribers_file
-        self.processed_emails_file = 'cache/processed_emails.json'
-        self.subscribers: Set[int] = set()
-        self.processed_email_hashes: Set[str] = set()
-        self._load_subscribers()
-        self._load_processed_emails()
-
-    def _load_subscribers(self):
-        try:
-            if os.path.exists(self.subscribers_file):
-                with open(self.subscribers_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.subscribers = set(data.get('subscribers', []))
-                    logger.info(f"Загружено {len(self.subscribers)} подписчиков")
-        except Exception as e:
-            logger.error(f"Ошибка загрузки подписчиков: {e}")
-
-    def _save_subscribers(self):
-        try:
-            os.makedirs(os.path.dirname(self.subscribers_file), exist_ok=True)
-            with open(self.subscribers_file, 'w', encoding='utf-8') as f:
-                json.dump({'subscribers': list(self.subscribers)}, f)
-        except Exception as e:
-            logger.error(f"Ошибка сохранения подписчиков: {e}")
-
-    def _load_processed_emails(self):
-        try:
-            if os.path.exists(self.processed_emails_file):
-                with open(self.processed_emails_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.processed_email_hashes = set(data.get('hashes', [])[-100:])
-        except Exception as e:
-            logger.error(f"Ошибка загрузки обработанных писем: {e}")
-
-    def _save_processed_emails(self):
-        try:
-            hashes = list(self.processed_email_hashes)[-100:]
-            with open(self.processed_emails_file, 'w', encoding='utf-8') as f:
-                json.dump({'hashes': hashes, 'last_updated': datetime.now().isoformat()}, f)
-        except Exception as e:
-            logger.error(f"Ошибка сохранения обработанных писем: {e}")
-
-    def add_subscriber(self, chat_id: int) -> bool:
-        if chat_id not in self.subscribers:
-            self.subscribers.add(chat_id)
-            self._save_subscribers()
-            logger.info(f"Добавлен подписчик: {chat_id}")
-            return True
-        return False
-
-    def remove_subscriber(self, chat_id: int) -> bool:
-        if chat_id in self.subscribers:
-            self.subscribers.discard(chat_id)
-            self._save_subscribers()
-            logger.info(f"Удален подписчик: {chat_id}")
-            return True
-        return False
-
-    def is_subscriber(self, chat_id: int) -> bool:
-        return chat_id in self.subscribers
-
-    def get_subscribers(self):
-        return list(self.subscribers)
-
-    def is_email_processed(self, email_hash: str) -> bool:
-        return email_hash in self.processed_email_hashes
-
-    def mark_email_processed(self, email_hash: str):
-        self.processed_email_hashes.add(email_hash)
-        self._save_processed_emails()
-
-    def get_stats(self):
-        return {
-            'subscribers_count': len(self.subscribers),
-            'processed_emails': len(self.processed_email_hashes)
-        }
 
 
 # === HTTP HEALTH CHECK SERVER ===
@@ -120,23 +43,19 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 
-# === SELF-PING ЧЕРЕЗ TELEGRAM (обход sleeping) ===
+# === SELF-PING ЧЕРЕЗ TELEGRAM ===
 class TelegramSelfPing:
-    """Отправляет периодические обновления в Telegram чтобы держать сервер awake"""
-
     def __init__(self, bot, chat_id: int, interval_minutes: int = 10):
         self.bot = bot
         self.chat_id = chat_id
-        self.interval = interval_minutes * 60  # в секундах
+        self.interval = interval_minutes * 60
         self.message_id = None
         self.running = False
         self._task = None
-        self._dot_state = True  # True = показываем точку, False = убираем
+        self._dot_state = True
 
     async def start(self):
-        """Запускает self-ping"""
         self.running = True
-        # Отправляем начальное служебное сообщение
         try:
             msg = await self.bot.send_message(
                 chat_id=self.chat_id,
@@ -151,7 +70,6 @@ class TelegramSelfPing:
         self._task = asyncio.create_task(self._ping_loop())
 
     async def stop(self):
-        """Останавливает self-ping"""
         self.running = False
         if self._task:
             self._task.cancel()
@@ -161,14 +79,13 @@ class TelegramSelfPing:
                 pass
 
     async def _ping_loop(self):
-        """Цикл обновления сообщения"""
         counter = 0
         while self.running and not shutdown_event.is_set():
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=self.interval)
-                break  # Получен сигнал завершения
+                break
             except asyncio.TimeoutError:
-                pass  # Продолжаем работу
+                pass
 
             if not self.running:
                 break
@@ -176,12 +93,9 @@ class TelegramSelfPing:
             try:
                 counter += 1
                 now = datetime.now().strftime("%H:%M:%S")
-
-                # Чередуем состояние для создания активности
                 self._dot_state = not self._dot_state
                 dot = "●" if self._dot_state else "○"
 
-                # Обновляем сообщение
                 text = (
                     f"🟢 Бот активен {dot}\n"
                     f"⏱️ Обновление #{counter}\n"
@@ -198,7 +112,6 @@ class TelegramSelfPing:
 
             except Exception as e:
                 logger.warning(f"Ошибка self-ping: {e}")
-                # Если сообщение удалено, создадим новое
                 if "message to edit not found" in str(e).lower():
                     try:
                         msg = await self.bot.send_message(
@@ -210,6 +123,7 @@ class TelegramSelfPing:
                         logger.error(f"Не удалось пересоздать сообщение: {e2}")
 
         logger.info("Self-ping остановлен")
+
 
 def run_health_server():
     port = int(os.getenv('PORT', 8080))
@@ -294,7 +208,6 @@ class RequestLogger:
 rate_limiter = RateLimiter(max_requests=15, time_window=60)
 user_blacklist = UserBlacklist()
 request_logger = RequestLogger()
-notification_manager = NotificationManager()
 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 application = None
@@ -383,6 +296,7 @@ def public_callback(func):
 email_parser = EmailParser(EMAIL_USER, EMAIL_PASSWORD, IMAP_SERVER)
 schedule_manager = ScheduleManager()
 image_generator = ScheduleImageGenerator()
+db = Database()  # <-- Redis, берёт UPSTASH_REDIS_URL из env
 
 image_cache: Dict[str, tuple] = {}
 IMAGE_CACHE_TTL = 3600
@@ -393,9 +307,27 @@ def get_day_name(day_code: str) -> str:
             'пт': 'Пятница', 'сб': 'Суббота', 'вс': 'Воскресенье'}.get(day_code, day_code.upper())
 
 
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (определены ДО использования) ===
+async def _try_load_from_email(days_back=3):
+    """Загружает расписание из email и обновляет кэш"""
+    try:
+        loop = asyncio.get_running_loop()
+        all_schedule = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: email_parser.get_all_schedules(days_back=days_back)),
+            timeout=EMAIL_CHECK_TIMEOUT
+        )
+        if all_schedule:
+            schedule_manager.update_schedule_from_email(all_schedule)
+            return True
+    except asyncio.TimeoutError:
+        logger.error("Таймаут загрузки email")
+    except Exception as e:
+        logger.error(f"Ошибка авто-загрузки: {e}")
+    return False
+
+
 # === АВТОМАТИЧЕСКАЯ ПРОВЕРКА ПОЧТЫ ===
 async def check_new_schedules():
-    """Периодическая проверка новых расписаний в почте"""
     global application
 
     await asyncio.sleep(10)
@@ -414,17 +346,17 @@ async def check_new_schedules():
             for email_data in emails_data:
                 email_hash = email_data['hash']
 
-                if notification_manager.is_email_processed(email_hash):
+                if db.is_email_processed(email_hash):
                     continue
 
                 body = email_parser.extract_body(email_data['message'])
                 if not body:
-                    notification_manager.mark_email_processed(email_hash)
+                    db.mark_email_processed(email_hash)
                     continue
 
                 parsed = email_parser.parse_schedule_from_text(body)
                 if not parsed:
-                    notification_manager.mark_email_processed(email_hash)
+                    db.mark_email_processed(email_hash)
                     continue
 
                 new_schedules_found.append({
@@ -434,7 +366,7 @@ async def check_new_schedules():
                 })
 
                 schedule_manager.update_schedule_from_email(parsed)
-                notification_manager.mark_email_processed(email_hash)
+                db.mark_email_processed(email_hash)
 
                 logger.info(f"✅ Найдено новое расписание: {email_data['subject']}")
 
@@ -451,9 +383,8 @@ async def check_new_schedules():
 
 
 async def notify_subscribers(new_schedules: list):
-    """Отправляет уведомления всем подписчикам о новом расписании"""
     global application
-    subscribers = notification_manager.get_subscribers()
+    subscribers = db.get_subscribers()
 
     if not subscribers:
         logger.info("Нет подписчиков для уведомления")
@@ -496,8 +427,6 @@ async def notify_subscribers(new_schedules: list):
                     await asyncio.sleep(0.1)
                 except Exception as e:
                     logger.error(f"Ошибка отправки уведомления {chat_id}: {e}")
-                    if "blocked" in str(e).lower() or "not found" in str(e).lower():
-                        notification_manager.remove_subscriber(chat_id)
 
 
 # === ПУБЛИЧНЫЕ КОМАНДЫ ===
@@ -526,7 +455,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == 'subscribe':
         chat_id = update.effective_chat.id
-        if notification_manager.add_subscriber(chat_id):
+        if db.add_subscriber(chat_id):
             await query.edit_message_text(
                 "✅ Вы подписались на уведомления о новом расписании!\n"
                 "Бот будет автоматически сообщать, когда придет новое расписание на почту."
@@ -537,7 +466,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == 'unsubscribe':
         chat_id = update.effective_chat.id
-        if notification_manager.remove_subscriber(chat_id):
+        if db.remove_subscriber(chat_id):
             await query.edit_message_text(
                 "🔕 Уведомления отключены.\n"
                 "Вы больше не будете получать автоматические сообщения о новом расписании.\n\n"
@@ -568,7 +497,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
     has_cache = cache_info['total_lessons'] > 0
     is_admin = update.effective_user.id == ADMIN_USER_ID
     chat_id = update.effective_chat.id
-    is_subscribed = notification_manager.is_subscriber(chat_id)
+    is_subscribed = db.is_subscriber(chat_id)
 
     keyboard = [
         [InlineKeyboardButton("📅 Сегодня", callback_data='today')],
@@ -727,17 +656,15 @@ async def cache_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @public_command
 async def clear_cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Только очищает кэш расписания, подписчиков не трогает"""
     schedule_manager.clear_cache()
     image_cache.clear()
-    # Подписчики НЕ трогаем!
     await update.message.reply_text("🗑️ Кэш расписания очищен.\n👥 Подписчики сохранены.")
 
 
 @public_command
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cache_info = schedule_manager.get_cache_info()
-    notif_stats = notification_manager.get_stats()
+    notif_stats = db.get_stats()
     await update.message.reply_text(
         f"📊 Статистика бота:\n\n"
         f"📅 Дат в расписании: {len(cache_info['dates'])}\n"
@@ -751,7 +678,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @public_command
 async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if notification_manager.add_subscriber(chat_id):
+    if db.add_subscriber(chat_id):
         await update.message.reply_text(
             "✅ <b>Подписка оформлена!</b>\n\n"
             "Теперь вы будете получать уведомления, когда приходит новое расписание на почту.\n"
@@ -768,7 +695,7 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @public_command
 async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if notification_manager.remove_subscriber(chat_id):
+    if db.remove_subscriber(chat_id):
         await update.message.reply_text(
             "🔕 <b>Уведомления отключены</b>\n\n"
             "Вы больше не будете получать автоматические сообщения.\n"
@@ -783,7 +710,6 @@ async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # === АДМИНСКИЕ КОМАНДЫ ===
-# === НОВЫЕ АДМИН-КОМАНДЫ ===
 
 async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
     query = update.callback_query
@@ -793,7 +719,6 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
         await query.edit_message_text("⛔ Только для администратора.")
         return
 
-    # === ГЛАВНОЕ МЕНЮ АДМИНА ===
     if data == 'admin_panel':
         keyboard = [
             [InlineKeyboardButton("📦 Управление кэшем", callback_data='admin_cache_menu')],
@@ -809,7 +734,6 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-    # === МЕНЮ КЭША ===
     elif data == 'admin_cache_menu':
         cache_info = schedule_manager.get_cache_info()
 
@@ -821,7 +745,6 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             f"{'✅' if cache_info['is_fresh'] else '⚠️'} Статус: {'Свежий' if cache_info['is_fresh'] else 'Устарел'}\n\n"
         )
 
-        # Показываем последние 10 дат
         if cache_info['dates']:
             recent_dates = sorted(cache_info['dates'])[-10:]
             text += "<b>Последние даты:</b>\n"
@@ -843,7 +766,6 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             parse_mode='HTML'
         )
 
-    # === ПРОСМОТР ВСЕГО КЭША ===
     elif data == 'admin_cache_view_full':
         cache = schedule_manager._load_cache()
 
@@ -856,7 +778,6 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             )
             return
 
-        # Формируем текст с кэшем (разбиваем на части если большой)
         text = "📦 <b>Полный кэш расписания:</b>\n\n"
 
         for date_str in sorted(cache.keys()):
@@ -871,14 +792,13 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             lessons = cache[date_str]
             text += f"📅 <b>{date_formatted}</b> — {len(lessons)} уроков\n"
 
-            for lesson in lessons[:5]:  # Показываем первые 5 уроков
+            for lesson in lessons[:5]:
                 text += f"  <code>{lesson['number']}.</code> {lesson['timebegin']}-{lesson['timeend']} {lesson['name'][:30]}\n"
 
             if len(lessons) > 5:
                 text += f"  <i>... и ещё {len(lessons) - 5} уроков</i>\n"
             text += "\n"
 
-            # Telegram ограничение ~4000 символов
             if len(text) > 3500:
                 text += "<i>... (кэш обрезан, слишком большой)</i>"
                 break
@@ -888,7 +808,6 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             [InlineKeyboardButton("◀️ Назад", callback_data='admin_cache_menu')]
         ]
 
-        # Если текст слишком длинный, отправляем как файл
         if len(text) > 4000:
             import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
@@ -913,11 +832,9 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
                 parse_mode='HTML'
             )
 
-    # === ОЧИСТКА КЭША (только расписание!) ===
     elif data == 'admin_cache_clear':
         schedule_manager.clear_cache()
         image_cache.clear()
-        # Подписчики НЕ трогаем!
 
         await query.edit_message_text(
             "✅ <b>Кэш расписания очищен!</b>\n\n"
@@ -931,10 +848,9 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             parse_mode='HTML'
         )
 
-    # === МЕНЮ ПОДПИСЧИКОВ ===
     elif data == 'admin_subs_menu':
-        notif_stats = notification_manager.get_stats()
-        subscribers = notification_manager.get_subscribers()
+        notif_stats = db.get_stats()
+        subscribers = db.get_subscribers()
 
         text = (
             f"👥 <b>Управление подписчиками</b>\n\n"
@@ -953,23 +869,19 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             parse_mode='HTML'
         )
 
-    # === ПРОСМОТР ПОДПИСЧИКОВ ===
     elif data == 'admin_subs_view':
-        subscribers = notification_manager.get_subscribers()
+        subscribers = db.get_subscribers()
 
         if not subscribers:
             await query.edit_message_text(
                 "👥 Нет подписчиков",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Назад", callback_data='admin_subs_menu')
-                ]])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_subs_menu')]])
             )
             return
 
         text = f"👥 <b>Список подписчиков ({len(subscribers)}):</b>\n\n"
 
         for i, chat_id in enumerate(subscribers, 1):
-            # Пытаемся получить информацию о пользователе
             try:
                 chat = await context.bot.get_chat(chat_id)
                 username = f"@{chat.username}" if chat.username else "нет username"
@@ -983,7 +895,6 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             [InlineKeyboardButton("◀️ Назад", callback_data='admin_subs_menu')]
         ]
 
-        # Если слишком длинно — отправляем файлом
         if len(text) > 4000:
             import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
@@ -1006,21 +917,18 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
                 parse_mode='HTML'
             )
 
-    # === ОЧИСТКА НЕАКТИВНЫХ ПОДПИСЧИКОВ ===
     elif data == 'admin_subs_cleanup':
-        """Проверяет и удаляет заблокировавших бота"""
-        subscribers = notification_manager.get_subscribers()
+        subscribers = db.get_subscribers()
         removed = []
 
         await query.edit_message_text("🧹 Проверяю подписчиков...")
 
-        for chat_id in subscribers[:]:  # Копия списка
+        for chat_id in subscribers[:]:
             try:
                 await context.bot.send_chat_action(chat_id=chat_id, action='typing')
             except Exception as e:
-                # Бот заблокирован или пользователь не найден
                 if "blocked" in str(e).lower() or "not found" in str(e).lower() or "deactivated" in str(e).lower():
-                    notification_manager.remove_subscriber(chat_id)
+                    db.remove_subscriber(chat_id)
                     removed.append(chat_id)
 
         if removed:
@@ -1033,16 +941,13 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
 
         await query.edit_message_text(
             text,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Назад", callback_data='admin_subs_menu')
-            ]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_subs_menu')]]),
             parse_mode='HTML'
         )
 
-    # === ОСТАЛЬНЫЕ КНОПКИ ===
     elif data == 'admin_stats':
         cache_info = schedule_manager.get_cache_info()
-        notif_stats = notification_manager.get_stats()
+        notif_stats = db.get_stats()
         stats = (
             f"📊 Статистика бота:\n\n"
             f"<b>Кэш расписания:</b>\n"
@@ -1057,9 +962,7 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
         )
         await query.edit_message_text(
             stats,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')
-            ]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data='admin_panel')]]),
             parse_mode='HTML'
         )
 
@@ -1098,6 +1001,7 @@ async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
             parse_mode='HTML'
         )
 
+
 @admin_command
 async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1128,13 +1032,12 @@ async def unblock_user_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 @admin_command
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Рассылка сообщения всем подписчикам"""
     if not context.args:
         await update.message.reply_text("❌ Укажите текст сообщения: /broadcast <текст>")
         return
 
     message_text = ' '.join(context.args)
-    subscribers = notification_manager.get_subscribers()
+    subscribers = db.get_subscribers()
 
     if not subscribers:
         await update.message.reply_text("❌ Нет подписчиков для рассылки.")
@@ -1157,8 +1060,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка рассылки {chat_id}: {e}")
             failed_count += 1
-            if "blocked" in str(e).lower():
-                notification_manager.remove_subscriber(chat_id)
 
     await update.message.reply_text(
         f"✅ Рассылка завершена!\n"
@@ -1167,62 +1068,42 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def _try_load_from_email(days_back=3):
-    try:
-        loop = asyncio.get_running_loop()
-        all_schedule = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: email_parser.get_all_schedules(days_back=days_back)),
-            timeout=EMAIL_CHECK_TIMEOUT
-        )
-        if all_schedule:
-            schedule_manager.update_schedule_from_email(all_schedule)
-            return True
-    except asyncio.TimeoutError:
-        logger.error("Таймаут загрузки email")
-    except Exception as e:
-        logger.error(f"Ошибка авто-загрузки: {e}")
-    return False
-
-
 def signal_handler(sig, frame):
-    """Обработчик сигналов для graceful shutdown"""
     logger.info(f"Получен сигнал {sig}, завершаю работу...")
     shutdown_event.set()
 
 
 async def main_async():
-    """Асинхронная main функция"""
     global application
 
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN не задан!")
         return
 
+    if not os.getenv('UPSTASH_REDIS_URL'):
+        logger.error("UPSTASH_REDIS_URL не задан!")
+        return
+
     os.makedirs('cache', exist_ok=True)
     os.makedirs('Fonts', exist_ok=True)
 
-    # Регистрируем обработчики сигналов
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Запускаем health-check сервер в отдельном потоке
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
 
-    # Создаем приложение
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # === ИНИЦИАЛИЗАЦИЯ SELF-PING ===
     self_ping = None
     if ADMIN_USER_ID:
         self_ping = TelegramSelfPing(
             bot=application.bot,
-            chat_id=ADMIN_USER_ID,  # Отправляем в личку админу
-            interval_minutes=10  # Каждые 10 минут
+            chat_id=ADMIN_USER_ID,
+            interval_minutes=10
         )
         logger.info(f"Self-ping настроен: чат {ADMIN_USER_ID}, интервал 10 мин")
 
-    # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("update", update_command))
     application.add_handler(CommandHandler("cache", cache_info_command))
@@ -1237,30 +1118,23 @@ async def main_async():
 
     logger.info("Бот запущен с авто-проверкой почты и self-ping!")
     logger.info(f"Интервал проверки почты: {EMAIL_CHECK_INTERVAL} сек")
-    logger.info(f"Подписчиков: {len(notification_manager.get_subscribers())}")
+    logger.info(f"Подписчиков: {len(db.get_subscribers())}")
 
-    # Запускаем фоновые задачи
     email_check_task = asyncio.create_task(check_new_schedules())
 
-    # Запускаем self-ping после инициализации бота
     if self_ping:
         await self_ping.start()
 
-    # Запускаем бота
     await application.initialize()
     await application.start()
 
-    # Запускаем polling в отдельной задаче
     polling_task = asyncio.create_task(
         application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True))
 
-    # Ждем сигнала завершения
     await shutdown_event.wait()
 
-    # Graceful shutdown
     logger.info("Остановка бота...")
 
-    # Останавливаем self-ping
     if self_ping:
         await self_ping.stop()
 
@@ -1283,7 +1157,6 @@ async def main_async():
 
 
 def main():
-    """Точка входа"""
     asyncio.run(main_async())
 
 
